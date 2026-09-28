@@ -143,6 +143,13 @@ export class RemotePageController {
 		return this.remoteCallDomAction('select_option', args)
 	}
 
+	async selectOptionAtPoint(
+		point: { x: number; y: number },
+		optionText: string
+	): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('select_option_at_point', [point, optionText])
+	}
+
 	async scroll(...args: any[]): Promise<DomActionReturn> {
 		return this.remoteCallDomAction('scroll', args)
 	}
