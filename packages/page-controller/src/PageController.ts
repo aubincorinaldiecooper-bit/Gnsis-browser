@@ -283,6 +283,9 @@ export class PageController extends EventTarget {
 			if (resolved.element) {
 				return { element: resolved.element, method: resolved.method }
 			}
+
+			const reason = resolved.ambiguous ? 'ambiguous nearby controls' : 'no safe actionable target'
+			throw new Error(`Actuator target resolution abstained: ${reason}`)
 		}
 
 		return { element: this.getElementAtPoint(point), method: 'raw-point' }
