@@ -19,6 +19,7 @@ import type { FlatDomTree, InteractiveElementDomNode } from './dom/dom_tree/type
 import { getPageInfo } from './dom/getPageInfo'
 import { patchReact } from './patches/react'
 import { isAnchorElement } from './utils'
+import { resolveActionTarget, type PointActionKind, type PointActionOptions } from './resolveTarget'
 
 /**
  * Configuration for PageController
@@ -239,45 +240,95 @@ export class PageController extends EventTarget {
 	}
 
 	/**
-	 * Resolve a visual target chosen by Panoptic/Laya to the live element under
-	 * that viewport coordinate. This is actuator-only DOM use: the DOM is not
-	 * exposed as perception or model context.
+	 * Convert the normalized visual point emitted by Panoptic/Laya to CSS
+	 * viewport pixels. Resolution happens only after the visual target and
+	 * bounded action are already selected.
 	 */
+	private getViewportPoint(point: { x: number; y: number }): {
+		normalized: { x: number; y: number }
+		css: { x: number; y: number }
+	} {
+		const normalized = {
+			x: Math.min(1, Math.max(0, point.x)),
+			y: Math.min(1, Math.max(0, point.y)),
+		}
+		const css = {
+			x: Math.min(window.innerWidth - 1, Math.max(0, normalized.x * window.innerWidth)),
+			y: Math.min(window.innerHeight - 1, Math.max(0, normalized.y * window.innerHeight)),
+		}
+		return { normalized, css }
+	}
+
 	private getElementAtPoint(point: { x: number; y: number }): HTMLElement {
-		const normalizedX = Math.min(1, Math.max(0, point.x))
-		const normalizedY = Math.min(1, Math.max(0, point.y))
-		const x = Math.min(window.innerWidth - 1, Math.max(0, normalizedX * window.innerWidth))
-		const y = Math.min(window.innerHeight - 1, Math.max(0, normalizedY * window.innerHeight))
-		const hit = document.elementFromPoint(x, y)
+		const { normalized, css } = this.getViewportPoint(point)
+		const hit = document.elementFromPoint(css.x, css.y)
 		if (!(hit instanceof HTMLElement)) {
-			throw new Error(`No HTMLElement found at visual point (${normalizedX.toFixed(3)}, ${normalizedY.toFixed(3)})`)
+			throw new Error(
+				`No HTMLElement found at visual point (${normalized.x.toFixed(3)}, ${normalized.y.toFixed(3)})`
+			)
 		}
 		return hit
 	}
 
-	async clickPoint(point: { x: number; y: number }): Promise<ActionResult> {
+	private resolveElementAtPoint(
+		action: PointActionKind,
+		point: { x: number; y: number },
+		options: PointActionOptions
+	): { element: HTMLElement; method: string } {
+		if (options.resolveTarget) {
+			const { css } = this.getViewportPoint(point)
+			const resolved = resolveActionTarget(action, css, {
+				maxRadiusPx: options.maxRadiusPx,
+			})
+			if (resolved.element) {
+				return { element: resolved.element, method: resolved.method }
+			}
+		}
+
+		return { element: this.getElementAtPoint(point), method: 'raw-point' }
+	}
+
+	async clickPoint(
+		point: { x: number; y: number },
+		options: PointActionOptions = {}
+	): Promise<ActionResult> {
 		try {
-			const element = this.getElementAtPoint(point)
+			const { element, method } = this.resolveElementAtPoint('click', point, options)
 			await clickElement(element)
-			return { success: true, message: `✅ Clicked visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}).` }
+			return {
+				success: true,
+				message: `✅ Clicked visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}) via ${method}.`,
+			}
 		} catch (error) {
 			return { success: false, message: `❌ Failed to click visual target: ${error}` }
 		}
 	}
 
-	async inputTextAtPoint(point: { x: number; y: number }, text: string): Promise<ActionResult> {
+	async inputTextAtPoint(
+		point: { x: number; y: number },
+		text: string,
+		options: PointActionOptions = {}
+	): Promise<ActionResult> {
 		try {
-			let element = this.getElementAtPoint(point)
+			let { element, method } = this.resolveElementAtPoint('type', point, options)
 			if (
 				!(element instanceof HTMLInputElement) &&
 				!(element instanceof HTMLTextAreaElement) &&
 				!element.isContentEditable
 			) {
-				const candidate = element.closest<HTMLElement>('input, textarea, [contenteditable="true"]')
-				if (candidate) element = candidate
+				const candidate = element.closest<HTMLElement>(
+					'input, textarea, [contenteditable="true"]'
+				)
+				if (candidate) {
+					element = candidate
+					method = 'actionable-ancestor'
+				}
 			}
 			await inputTextElement(element, text)
-			return { success: true, message: `✅ Typed into visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}).` }
+			return {
+				success: true,
+				message: `✅ Typed into visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}) via ${method}.`,
+			}
 		} catch (error) {
 			return { success: false, message: `❌ Failed to type into visual target: ${error}` }
 		}
@@ -285,19 +336,26 @@ export class PageController extends EventTarget {
 
 	async selectOptionAtPoint(
 		point: { x: number; y: number },
-		optionText: string
+		optionText: string,
+		options: PointActionOptions = {}
 	): Promise<ActionResult> {
 		try {
-			let element = this.getElementAtPoint(point)
+			let { element, method } = this.resolveElementAtPoint('select', point, options)
 			if (!(element instanceof HTMLSelectElement)) {
 				const candidate = element.closest('select')
-				if (candidate instanceof HTMLSelectElement) element = candidate
+				if (candidate instanceof HTMLSelectElement) {
+					element = candidate
+					method = 'actionable-ancestor'
+				}
 			}
 			if (!(element instanceof HTMLSelectElement)) {
 				throw new Error('Visual target is not a select element')
 			}
 			await selectOptionElement(element, optionText)
-			return { success: true, message: `✅ Selected option (${optionText}) at visual target.` }
+			return {
+				success: true,
+				message: `✅ Selected option (${optionText}) at visual target via ${method}.`,
+			}
 		} catch (error) {
 			return { success: false, message: `❌ Failed to select visual target: ${error}` }
 		}
@@ -512,3 +570,4 @@ export class PageController extends EventTarget {
 }
 
 export * from './actions'
+export * from './resolveTarget'
