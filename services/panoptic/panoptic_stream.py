@@ -30,55 +30,24 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from PIL import Image
 from websockets.asyncio.server import ServerConnection, serve
 
+from session import PanopticStreamingSession
+
 # Implementation provenance is intentionally kept inside the runtime rather than
 # exposed through the GNSIS Browser API. See UPSTREAM.md for source/license notes.
 _BACKEND_MODEL_ID = "MCG-NJU/VideoChat3-4B"
 _BACKEND_REVISION = os.environ.get("PANOPTIC_MODEL_REVISION", "37fa901")
 _WEIGHTS_DIR = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 
-NORMAL_MAX_PIXELS = int(os.environ.get("PANOPTIC_NORMAL_MAX_PIXELS", str(224 * 224)))
-STANDBY_MAX_PIXELS = int(
-    os.environ.get("PANOPTIC_STANDBY_MAX_PIXELS", str(NORMAL_MAX_PIXELS * 4))
-)
-DEFAULT_CONTEXT_ROUNDS = int(os.environ.get("PANOPTIC_CONTEXT_ROUNDS", "4096"))
+NORMAL_MAX_PIXELS = int(os.environ.get("PANOPTIC_NORMAL_MAX_PIXELS", str(128 * 784)))
+STANDBY_MAX_PIXELS = int(os.environ.get("PANOPTIC_STANDBY_MAX_PIXELS", str(512 * 784)))
+DEFAULT_CONTEXT_ROUNDS = int(os.environ.get("PANOPTIC_CONTEXT_ROUNDS", "32"))
 DEFAULT_MAX_FRAMES = int(os.environ.get("PANOPTIC_MAX_FRAMES", "4096"))
 DEFAULT_MAX_TOKENS = int(os.environ.get("PANOPTIC_MAX_OUTPUT_TOKENS", "192"))
-MAX_FRAME_BYTES = int(os.environ.get("PANOPTIC_MAX_FRAME_BYTES", "2500000"))
+DEFAULT_STANDBY_HIGH_RES_FRAMES = int(os.environ.get("PANOPTIC_STANDBY_HIGH_RES_FRAMES", "3"))
+MAX_FRAME_BYTES = int(os.environ.get("PANOPTIC_MAX_FRAME_BYTES", "5000000"))
 AUTH_TOKEN = os.environ.get("GNSIS_PANOPTIC_TOKEN", "")
 
 _TAG_RE = re.compile(r"^\s*(</Silence>|</Standby>|</Response>)\s*(.*)$", re.DOTALL)
-
-
-def _perception_prompt(task: str) -> str:
-    return f"""Continuously observe the browser viewport for this user task:
-
-{task.strip()}
-
-You are Panoptic, the perception layer only. Do not choose a browser action and
-never execute anything. Preserve temporal evidence across frames and decide when
-there is enough evidence to surface a useful current state.
-
-When the streaming policy chooses </Response>, return JSON only:
-{{
-  "summary": "what is visibly true now",
-  "change": "what materially changed since the previous useful state",
-  "page_stable": true,
-  "targets": [
-    {{
-      "id": "short-stable-id",
-      "label": "visible label or concise visual description",
-      "role": "button|link|input|select|tab|other",
-      "point": {{"x": 0.0, "y": 0.0}},
-      "affordances": ["CLICK", "TYPE_TEXT", "SELECT", "SCROLL"]
-    }}
-  ]
-}}
-
-point.x and point.y are normalized viewport coordinates in [0,1], centered on
-the visible target. Report no more than 12 currently visible, task-relevant
-targets. Do not emit selectors, DOM indexes, JavaScript, or action instructions.
-If evidence is still evolving, use </Standby>. If it is not yet useful, use
-</Silence> exactly as the native streaming policy specifies."""
 
 
 def _parse_stream_answer(answer: str) -> tuple[str, str]:
@@ -109,6 +78,7 @@ class StartConfig:
     context_rounds: int
     max_frames: int
     max_tokens: int
+    standby_high_res_frames: int
 
 
 def _parse_start(payload: dict[str, Any]) -> StartConfig:
@@ -127,12 +97,17 @@ def _parse_start(payload: dict[str, Any]) -> StartConfig:
     context_rounds = int(payload.get("context_rounds", DEFAULT_CONTEXT_ROUNDS))
     max_frames = int(payload.get("max_frames", DEFAULT_MAX_FRAMES))
     max_tokens = int(payload.get("max_tokens", DEFAULT_MAX_TOKENS))
+    standby_high_res_frames = int(
+        payload.get("standby_high_res_frames", DEFAULT_STANDBY_HIGH_RES_FRAMES)
+    )
     if context_rounds < 1:
         raise ValueError("context_rounds must be >= 1")
     if max_frames < 0:
         raise ValueError("max_frames must be >= 0 (0 means unbounded)")
     if max_tokens < 16:
         raise ValueError("max_tokens must be >= 16")
+    if standby_high_res_frames < 0:
+        raise ValueError("standby_high_res_frames must be >= 0")
 
     return StartConfig(
         session_id=session_id,
@@ -141,6 +116,7 @@ def _parse_start(payload: dict[str, Any]) -> StartConfig:
         context_rounds=context_rounds,
         max_frames=max_frames,
         max_tokens=max_tokens,
+        standby_high_res_frames=standby_high_res_frames,
     )
 
 
@@ -160,54 +136,41 @@ class Runtime:
             revision=_BACKEND_REVISION,
             cache_dir=_WEIGHTS_DIR,
         )
-        spec = importlib.util.spec_from_file_location("panoptic_stream_backend", stream_path)
+        spec = importlib.util.spec_from_file_location("panoptic_backend", stream_path)
         if spec is None or spec.loader is None:
-            raise RuntimeError("could not load Panoptic streaming backend")
+            raise RuntimeError("could not load Panoptic backend")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        self.StreamingSession = module.StreamingSession
         self.engine = module.VideoChat3StreamEngine(
             model_path,
             device="auto",
             attn_implementation=os.environ.get(
                 "PANOPTIC_ATTN_IMPLEMENTATION", "flash_attention_2"
             ),
+            max_pixels=max(NORMAL_MAX_PIXELS, STANDBY_MAX_PIXELS),
         )
         self.startup_ms = int((time.time() - started) * 1000)
         self.infer_lock = asyncio.Lock()
 
-    def new_session(self, config: StartConfig):
-        return self.StreamingSession(
+    def new_session(self, config: StartConfig) -> PanopticStreamingSession:
+        return PanopticStreamingSession(
             self.engine,
-            question=_perception_prompt(config.task),
-            question_time=0,
-            max_rounds=config.context_rounds,
-            global_question=True,
+            task=config.task,
+            context_rounds=config.context_rounds,
             max_tokens=config.max_tokens,
-            temperature=0.0,
+            normal_max_pixels=NORMAL_MAX_PIXELS,
+            standby_max_pixels=STANDBY_MAX_PIXELS,
         )
 
     async def step(
         self,
-        session: Any,
-        frame: Image.Image,
-        round_idx: int,
-        frame_max_pixels: int,
-        time_start: float,
-        time_end: float,
+        session: PanopticStreamingSession,
+        frames: list[tuple[Image.Image, float, float, bool]],
+        events: list[dict[str, Any]],
     ) -> str:
-        # One local model instance is shared by tab sessions. Serialize model
-        # generation while preserving independent causal histories per session.
         async with self.infer_lock:
-            return await asyncio.to_thread(
-                session.step,
-                frame,
-                round_idx=round_idx,
-                frame_max_pixels=frame_max_pixels,
-                time_start=time_start,
-                time_end=time_end,
-            )
+            return await asyncio.to_thread(session.step, frames, events)
 
 
 async def _send_json(ws: ServerConnection, payload: dict[str, Any]) -> None:
@@ -239,12 +202,14 @@ async def _handle_connection(ws: ServerConnection, runtime: Runtime) -> None:
                 "max_frames": config.max_frames,
                 "normal_max_pixels": NORMAL_MAX_PIXELS,
                 "standby_max_pixels": STANDBY_MAX_PIXELS,
+                "standby_high_res_frames": config.standby_high_res_frames,
             },
         )
 
         frames_seen = 0
+        round_idx = 0
         last_timestamp_ms = -1.0
-        last_end_seconds = 0.0
+        watched_through_seconds = 0.0
         standby_high_res_remaining = 0
 
         async for raw_message in ws:
@@ -261,14 +226,98 @@ async def _handle_connection(ws: ServerConnection, runtime: Runtime) -> None:
                         "session_id": config.session_id,
                         "tab_id": config.tab_id,
                         "frames_seen": frames_seen,
-                        "watched_through_seconds": last_end_seconds,
+                        "rounds": round_idx,
+                        "watched_through_seconds": watched_through_seconds,
                         "elapsed_ms": int((time.time() - started) * 1000),
                     },
                 )
                 return
 
-            if kind != "frame":
+            if kind != "batch":
                 raise ValueError(f"unsupported stream message type: {kind!r}")
+
+            raw_frames = payload.get("frames")
+            if not isinstance(raw_frames, list) or not raw_frames:
+                raise ValueError("batch.frames must be a non-empty array")
+
+            if config.max_frames and frames_seen + len(raw_frames) > config.max_frames:
+                raw_frames = raw_frames[: max(0, config.max_frames - frames_seen)]
+            if not raw_frames:
+                await _send_json(
+                    ws,
+                    {
+                        "type": "done",
+                        "reason": "max_frames reached",
+                        "session_id": config.session_id,
+                        "tab_id": config.tab_id,
+                        "frames_seen": frames_seen,
+                    },
+                )
+                return
+
+            decoded: list[tuple[Image.Image, float, float, bool]] = []
+            last_frame_id = ""
+            high_res_flags: list[bool] = []
+
+            for item in raw_frames:
+                frame_id = str(item.get("frame_id") or "")
+                if not frame_id:
+                    raise ValueError("frame_id is required")
+                start_ms = float(item.get("timestamp_ms"))
+                duration_ms = max(1.0, float(item.get("duration_ms") or 1.0))
+                end_ms = start_ms + duration_ms
+                if start_ms < 0:
+                    raise ValueError("timestamp_ms must be non-negative")
+                if start_ms <= last_timestamp_ms:
+                    raise ValueError(
+                        f"frame timestamps must be strictly increasing: "
+                        f"{start_ms} <= {last_timestamp_ms}"
+                    )
+                encoded = item.get("image_base64")
+                if not isinstance(encoded, str) or not encoded:
+                    raise ValueError("image_base64 is required")
+
+                high_res = standby_high_res_remaining > 0
+                if high_res:
+                    standby_high_res_remaining -= 1
+                decoded.append((_decode_frame(encoded), start_ms, end_ms, high_res))
+                high_res_flags.append(high_res)
+                last_timestamp_ms = start_ms
+                watched_through_seconds = max(watched_through_seconds, end_ms / 1000.0)
+                frames_seen += 1
+                last_frame_id = frame_id
+
+            events = payload.get("events")
+            if not isinstance(events, list):
+                events = []
+
+            answer = await runtime.step(session, decoded, events)
+            state, content = _parse_stream_answer(answer)
+            if state == "standby":
+                standby_high_res_remaining = max(
+                    standby_high_res_remaining,
+                    config.standby_high_res_frames,
+                )
+
+            await _send_json(
+                ws,
+                {
+                    "type": "temporal_state",
+                    "session_id": config.session_id,
+                    "tab_id": config.tab_id,
+                    "frame_id": last_frame_id,
+                    "epoch": int(payload.get("epoch", 0)),
+                    "round_idx": round_idx,
+                    "state": state,
+                    "content": content,
+                    "time_start": decoded[0][1] / 1000.0,
+                    "time_end": decoded[-1][2] / 1000.0,
+                    "frames_in_round": len(decoded),
+                    "high_res_flags": high_res_flags,
+                    "high_res_frames_remaining": standby_high_res_remaining,
+                },
+            )
+            round_idx += 1
 
             if config.max_frames and frames_seen >= config.max_frames:
                 await _send_json(
@@ -279,72 +328,10 @@ async def _handle_connection(ws: ServerConnection, runtime: Runtime) -> None:
                         "session_id": config.session_id,
                         "tab_id": config.tab_id,
                         "frames_seen": frames_seen,
-                        "watched_through_seconds": last_end_seconds,
+                        "watched_through_seconds": watched_through_seconds,
                     },
                 )
                 return
-
-            frame_id = str(payload.get("frame_id") or "")
-            timestamp_ms = float(payload.get("timestamp_ms"))
-            duration_ms = max(1.0, float(payload.get("duration_ms") or 1.0))
-            epoch = int(payload.get("epoch", 0))
-            if not frame_id:
-                raise ValueError("frame_id is required")
-            if timestamp_ms < 0:
-                raise ValueError("timestamp_ms must be non-negative")
-            if timestamp_ms <= last_timestamp_ms:
-                raise ValueError(
-                    f"frame timestamps must be strictly increasing: "
-                    f"{timestamp_ms} <= {last_timestamp_ms}"
-                )
-
-            encoded = payload.get("image_base64")
-            if not isinstance(encoded, str) or not encoded:
-                raise ValueError("image_base64 is required")
-
-            frame = _decode_frame(encoded)
-            high_res = standby_high_res_remaining > 0
-            if high_res:
-                standby_high_res_remaining -= 1
-            frame_max_pixels = STANDBY_MAX_PIXELS if high_res else NORMAL_MAX_PIXELS
-
-            time_start = timestamp_ms / 1000.0
-            time_end = (timestamp_ms + duration_ms) / 1000.0
-            answer = await runtime.step(
-                session,
-                frame,
-                round_idx=frames_seen,
-                frame_max_pixels=frame_max_pixels,
-                time_start=time_start,
-                time_end=time_end,
-            )
-            frames_seen += 1
-            last_timestamp_ms = timestamp_ms
-            last_end_seconds = max(last_end_seconds, time_end)
-
-            state, content = _parse_stream_answer(answer)
-            if state == "standby":
-                # Upstream proactive streaming behavior: the next frame gets
-                # 2x width/height visual budget (= 4x pixels).
-                standby_high_res_remaining = max(standby_high_res_remaining, 1)
-
-            await _send_json(
-                ws,
-                {
-                    "type": "temporal_state",
-                    "session_id": config.session_id,
-                    "tab_id": config.tab_id,
-                    "frame_id": frame_id,
-                    "epoch": epoch,
-                    "round_idx": frames_seen - 1,
-                    "state": state,
-                    "content": content,
-                    "time_start": time_start,
-                    "time_end": time_end,
-                    "high_res": high_res,
-                    "high_res_next": standby_high_res_remaining > 0,
-                },
-            )
     except PermissionError as error:
         await ws.close(code=1008, reason=str(error)[:120])
     except Exception as error:
@@ -370,7 +357,7 @@ async def _main_async(host: str, port: int) -> None:
         lambda ws: _handle_connection(ws, runtime),
         host,
         port,
-        max_size=4_000_000,
+        max_size=24_000_000,
     ):
         await asyncio.Future()
 
