@@ -24,16 +24,20 @@ export interface PanopticTemporalState {
 	content: string
 	time_start: number
 	time_end: number
-	high_res: boolean
-	high_res_next: boolean
+	frames_in_round: number
+	high_res_flags: boolean[]
+	high_res_frames_remaining: number
 }
 
 export type VisualAction =
 	| { kind: 'CLICK'; target: VisualTarget; confidence: number }
 	| { kind: 'TYPE_TEXT'; target: VisualTarget; text: string; confidence: number }
+	| { kind: 'SELECT'; target: VisualTarget; optionText: string; confidence: number }
 	| { kind: 'SCROLL'; direction: 'up' | 'down'; amount: 'small' | 'page'; confidence: number }
+	| { kind: 'SCROLL_HORIZONTAL'; direction: 'left' | 'right'; pixels: number; confidence: number }
 	| { kind: 'OPEN_URL'; url: string; confidence: number }
 	| { kind: 'SWITCH_TAB'; tabId: number; confidence: number }
+	| { kind: 'CLOSE_TAB'; tabId: number; confidence: number }
 	| { kind: 'WAIT'; confidence: number }
 	| { kind: 'DONE'; confidence: number }
 
