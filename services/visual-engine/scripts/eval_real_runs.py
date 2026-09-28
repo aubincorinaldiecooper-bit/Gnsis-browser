@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from statistics import median
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gnsis_visual.real_runs import VARIANTS, RealRunCase, geometric_score
 
