@@ -43,8 +43,6 @@ export interface BrowserDecisionResult {
 export class BrowserActionBridge {
 	private readonly tabs = new TabsController()
 	private readonly page = new RemotePageController(this.tabs)
-	private attached = false
-
 	async execute(request: BrowserDecisionRequest): Promise<BrowserDecisionResult> {
 		if (!request.call_id) throw new Error('browser action requires call_id')
 		await this.ensureAttached()
@@ -134,20 +132,16 @@ export class BrowserActionBridge {
 
 	dispose(): void {
 		this.tabs.dispose()
-		this.attached = false
 	}
 
 	private async ensureAttached(): Promise<void> {
-		if (this.attached) {
-			await this.tabs.syncTabs()
-			if (this.tabs.currentTabId) return
-		}
+		// Re-resolve the active tab for every action. The person may have changed
+		// tabs between the frame GNSIS saw and the action arriving.
 		await this.tabs.attachToActiveTab({ includeAllTabs: true })
-		this.attached = true
 	}
 }
 
-function normalizedPoint(
+export function normalizedPoint(
 	decision: BrowserDecisionRequest['decision']
 ): { x: number; y: number } {
 	const target = decision.target
