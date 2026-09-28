@@ -227,3 +227,14 @@ Each of these is measured, not assumed.
 - Keep the public API model-independent (`schema.py` is the contract).
 - Measure native first; optimise only with numbers that justify it.
 - All code and comments in English.
+
+
+## Real-run benchmark direction
+
+The primary product benchmark now comes from **actual GNSIS executions**, not a permanently frozen synthetic held-out set.
+
+Real runs should preserve the pre-action frame, goal, raw visual target, optional OCR/r24 candidate probes, executor-side target geometry when available, actual actuator result, post-action verification, latency, and user correction/recovery signals. The evaluator is `scripts/eval_real_runs.py`; the schema and rolling-cohort policy are documented in `REAL_RUN_BENCHMARK.md`.
+
+Recent unseen real runs may be used as the current evaluation cohort and can later retire into training once newer runs replace them. Synthetic tasks remain useful for deterministic implementation tests and controlled experiments, but they are not the headline product benchmark.
+
+The rendered-pixel perception boundary does not change: executor geometry is evaluation/training metadata captured only after System 1 has already produced its target.
