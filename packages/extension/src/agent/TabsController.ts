@@ -47,6 +47,7 @@ export class TabsController {
 	private initialTabId: number | null = null
 	private tabGroupId: number | null = null
 	private experimentalIncludeAllTabs = false
+	private manageTabGroup = true
 	private task: string = ''
 
 	async init(task: string, options: TabsInitOptions = {}) {
@@ -64,6 +65,7 @@ export class TabsController {
 		this.tabGroupId = null
 		this.initialTabId = null
 		this.experimentalIncludeAllTabs = experimentalIncludeAllTabs
+		this.manageTabGroup = true
 		this.task = task
 
 		const activeTabResult = await sendMessage({
@@ -129,6 +131,70 @@ export class TabsController {
 		await this.updateCurrentTabId(this.currentTabId)
 	}
 
+	/**
+	 * Attach the controller to the browser window the person is actively using
+	 * without creating or modifying tab groups. This is the execution-only
+	 * entry point used when GNSIS has already made the visual decision.
+	 */
+	async attachToActiveTab(options: { includeAllTabs?: boolean } = {}): Promise<void> {
+		if (this.disposed) throw new Error('TabsController already disposed')
+
+		const includeAllTabs = options.includeAllTabs ?? true
+		await this.updateCurrentTabId(null)
+		this.windowId = null
+		this.tabs = []
+		this.tabGroupId = null
+		this.initialTabId = null
+		this.experimentalIncludeAllTabs = includeAllTabs
+		this.manageTabGroup = false
+		this.task = ''
+
+		const activeTabResult = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'get_active_tab',
+			payload: { windowId: await getOwnWindowId() },
+		})
+		const active = activeTabResult?.tab as chrome.tabs.Tab | undefined
+		if (!active?.id || active.windowId == null) {
+			throw new Error(activeTabResult?.error || 'Failed to get active tab')
+		}
+
+		this.initialTabId = active.id
+		this.windowId = active.windowId
+
+		if (includeAllTabs) {
+			const result = await sendMessage({
+				type: 'TAB_CONTROL',
+				action: 'get_window_tabs',
+				payload: { windowId: this.windowId },
+			})
+			const tabs = (result?.tabs as chrome.tabs.Tab[] | undefined) ?? []
+			for (const tab of tabs) {
+				if (tab.id && isContentScriptAllowed(tab.url)) {
+					this.addTab({
+						id: tab.id,
+						isInitial: tab.id === active.id,
+						url: tab.url,
+						title: tab.title,
+						status: tab.status,
+					})
+				}
+			}
+		}
+
+		if (!this.tabs.find((tab) => tab.id === active.id)) {
+			this.addTab({
+				id: active.id,
+				isInitial: true,
+				url: active.url,
+				title: active.title,
+				status: active.status,
+			})
+		}
+
+		await this.updateCurrentTabId(active.id)
+	}
+
 	async openNewTab(url: string, options: { signal?: AbortSignal } = {}): Promise<string> {
 		debug('openNewTab', url)
 
@@ -151,14 +217,16 @@ export class TabsController {
 
 		await this.switchToTab(tabId)
 
-		if (!this.tabGroupId) {
-			await this.createTabGroup([tabId])
-		} else {
-			await sendMessage({
-				type: 'TAB_CONTROL',
-				action: 'add_tab_to_group',
-				payload: { tabId: result.tabId, groupId: this.tabGroupId },
-			})
+		if (this.manageTabGroup) {
+			if (!this.tabGroupId) {
+				await this.createTabGroup([tabId])
+			} else {
+				await sendMessage({
+					type: 'TAB_CONTROL',
+					action: 'add_tab_to_group',
+					payload: { tabId: result.tabId, groupId: this.tabGroupId },
+				})
+			}
 		}
 
 		await this.waitUntilTabLoaded(tabId, options)
