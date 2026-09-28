@@ -49,6 +49,7 @@ export class PanopticClient {
 	private readyResolve: ((ready: ReadyMessage) => void) | null = null
 	private readyReject: ((error: Error) => void) | null = null
 	private pending = new Map<string, PendingFrame>()
+	private maxPendingFrames = 8
 	private closed = false
 	private config: PanopticSessionConfig
 
@@ -123,8 +124,10 @@ export class PanopticClient {
 		if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
 			throw new Error('Panoptic websocket is not open')
 		}
-		if (this.pending.size > 0) {
-			throw new Error('Panoptic backpressure violation: a frame is still in flight')
+		if (this.pending.size >= this.maxPendingFrames) {
+			throw new Error(
+				`Panoptic backpressure limit reached (${this.maxPendingFrames} frames in flight)`
+			)
 		}
 
 		return new Promise<PanopticTemporalState>((resolve, reject) => {
