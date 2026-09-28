@@ -28,6 +28,8 @@ export interface AdvancedConfig {
 	panopticContextRounds?: number
 	panopticMaxFrames?: number
 	panopticFps?: number
+	panopticInferFps?: number
+	panopticStandbyHighResFrames?: number
 	maxPerceptionSecondsPerStep?: number
 	layaUrl?: string
 }
@@ -85,6 +87,8 @@ export function useAgent(): UseAgentResult {
 			panopticContextRounds: config.panopticContextRounds,
 			panopticMaxFrames: config.panopticMaxFrames,
 			panopticFps: config.panopticFps,
+			panopticInferFps: config.panopticInferFps,
+			panopticStandbyHighResFrames: config.panopticStandbyHighResFrames,
 			maxPerceptionSecondsPerStep: config.maxPerceptionSecondsPerStep,
 			layaUrl: config.layaUrl,
 		})
@@ -145,6 +149,8 @@ export function useAgent(): UseAgentResult {
 			panopticContextRounds,
 			panopticMaxFrames,
 			panopticFps,
+			panopticInferFps,
+			panopticStandbyHighResFrames,
 			maxPerceptionSecondsPerStep,
 			layaUrl,
 			...llmConfig
@@ -166,6 +172,8 @@ export function useAgent(): UseAgentResult {
 				panopticContextRounds,
 				panopticMaxFrames,
 				panopticFps,
+				panopticInferFps,
+				panopticStandbyHighResFrames,
 				maxPerceptionSecondsPerStep,
 				layaUrl,
 			}
