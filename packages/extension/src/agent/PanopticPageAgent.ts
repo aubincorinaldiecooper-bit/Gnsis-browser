@@ -237,9 +237,29 @@ export class PanopticPageAgent extends EventTarget {
 		const client = await this.getPanopticSession(tabId, signal)
 		const frameIntervalMs = Math.round(1000 / this.config.panopticFps)
 		const deadline = performance.now() + this.config.maxPerceptionSecondsPerStep * 1000
+		const inFlight = new Set<Promise<PanopticTemporalState>>()
+		let latestResponse: PanopticTemporalState | null = null
+		let responseSeen = false
 
-		while (performance.now() < deadline) {
+		const track = (promise: Promise<PanopticTemporalState>) => {
+			inFlight.add(promise)
+			promise
+				.then((temporal) => {
+					if (temporal.state === 'response') {
+						latestResponse = temporal
+						responseSeen = true
+					}
+				})
+				.finally(() => inFlight.delete(promise))
+		}
+
+		while (performance.now() < deadline && !responseSeen) {
 			signal.throwIfAborted()
+			if (inFlight.size >= 8) {
+				await Promise.race(inFlight)
+				continue
+			}
+
 			const frameStarted = performance.now()
 			const imageBase64 = await captureViewport(tabId)
 			const elapsed = performance.now() - this.taskStartedAt
@@ -247,21 +267,27 @@ export class PanopticPageAgent extends EventTarget {
 			const timestampMs = Math.max(previous + 1, elapsed)
 			this.lastTimestampByTab.set(tabId, timestampMs)
 
-			const temporal = await client.pushFrame({
-				frameId: crypto.randomUUID(),
-				epoch: this.temporalEpoch,
-				timestampMs,
-				durationMs: frameIntervalMs,
-				imageBase64,
-			})
-			if (temporal.state === 'response') return temporal
+			track(
+				client.pushFrame({
+					frameId: crypto.randomUUID(),
+					epoch: this.temporalEpoch,
+					timestampMs,
+					durationMs: frameIntervalMs,
+					imageBase64,
+				})
+			)
 
 			const remaining = frameIntervalMs - (performance.now() - frameStarted)
 			if (remaining > 0) {
 				await new Promise((resolve) => setTimeout(resolve, remaining))
 			}
 		}
-		return null
+
+		// Drain frames captured before the response boundary. This keeps the
+		// state used by Laya aligned to the latest pre-action visual evidence
+		// instead of acting while older frames are still queued in Panoptic.
+		if (inFlight.size) await Promise.all(inFlight)
+		return latestResponse
 	}
 
 	private async getPanopticSession(tabId: number, signal: AbortSignal): Promise<PanopticClient> {
