@@ -2,6 +2,7 @@ import { FoldVertical, Plug, PlugZap, Square, UnfoldVertical, Unplug } from 'luc
 import { useEffect, useRef, useState } from 'react'
 
 import { useAgent } from '@/agent/useAgent'
+import { BrowserActionBridge } from '@/vision/BrowserActionBridge'
 import { ActivityCard, EventCard } from '@/components/cards'
 import { Logo, MotionOverlay, StatusDot } from '@/components/misc'
 import { Button } from '@/components/ui/button'
@@ -11,7 +12,19 @@ import { useHubWs } from './hub-ws'
 
 export default function App() {
 	const { status, history, activity, currentTask, config, execute, stop, configure } = useAgent()
-	const { wsState } = useHubWs(execute, stop, configure, config)
+	const browserBridgeRef = useRef<BrowserActionBridge | null>(null)
+	if (!browserBridgeRef.current) browserBridgeRef.current = new BrowserActionBridge()
+	const { wsState } = useHubWs(
+		execute,
+		stop,
+		configure,
+		config,
+		(request) => browserBridgeRef.current!.execute(request)
+	)
+
+	useEffect(() => {
+		return () => browserBridgeRef.current?.dispose()
+	}, [])
 
 	const historyRef = useRef<HTMLDivElement>(null)
 
