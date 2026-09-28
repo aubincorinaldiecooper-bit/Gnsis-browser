@@ -8,8 +8,11 @@ import type {
 import { RemotePageController } from './RemotePageController'
 import { TabsController } from './TabsController'
 import { LayaClient, parseVisualState } from '../vision/LayaClient'
-import { PanopticClient } from '../vision/PanopticClient'
-import { captureViewport } from '../vision/ViewportCapture'
+import {
+	PanopticClient,
+	type PanopticTimelineEvent,
+} from '../vision/PanopticClient'
+import { TabMediaCapture } from '../vision/TabMediaCapture'
 import { VisualActuator } from '../vision/VisualActuator'
 import type { PanopticTemporalState, VisualAction, VisualState } from '../vision/types'
 
@@ -22,6 +25,8 @@ export interface PanopticPageAgentConfig {
 	panopticContextRounds?: number
 	panopticMaxFrames?: number
 	panopticFps?: number
+	panopticInferFps?: number
+	panopticStandbyHighResFrames?: number
 	maxPerceptionSecondsPerStep?: number
 	layaUrl?: string
 }
@@ -29,12 +34,9 @@ export interface PanopticPageAgentConfig {
 /**
  * Page Agent fork runtime:
  *
- * Panoptic (causal visual perception) -> Laya (bounded decision) ->
- * Alibaba PageController (Actuator).
- *
- * The DOM tree is not used as perception or Laya context. DOM access is limited
- * to deterministic hit-testing/execution inside the Actuator after a visual
- * target coordinate has already been selected.
+ * persistent tab MediaStream -> Panoptic causal perception -> Laya bounded
+ * decision -> Alibaba PageController Actuator -> timestamped action event back
+ * into the same Panoptic timeline.
  */
 export class PanopticPageAgent extends EventTarget {
 	readonly id = crypto.randomUUID()
@@ -50,10 +52,11 @@ export class PanopticPageAgent extends EventTarget {
 	private abortController = new AbortController()
 	private running: Promise<void> = Promise.resolve()
 	private lastResultValue: ExecutionResult | null = null
-	private taskStartedAt = 0
+	private taskStartedAtEpochMs = 0
 	private temporalEpoch = 0
-	private lastTimestampByTab = new Map<number, number>()
 	private panopticByTab = new Map<number, PanopticClient>()
+	private captureByTab = new Map<number, TabMediaCapture>()
+	private timelineEventsByTab = new Map<number, PanopticTimelineEvent[]>()
 	private lastVisual: VisualState = {
 		summary: '',
 		change: '',
@@ -68,15 +71,24 @@ export class PanopticPageAgent extends EventTarget {
 
 	constructor(config: PanopticPageAgentConfig = {}) {
 		super()
+		const sampleFps = Math.min(8, Math.max(1, config.panopticFps ?? 4))
+		const inferFps = Math.min(sampleFps, Math.max(0.5, config.panopticInferFps ?? 1))
+		const ratio = sampleFps / inferFps
+		if (Math.abs(ratio - Math.round(ratio)) > 1e-6) {
+			throw new Error('panopticFps / panopticInferFps must be a positive integer')
+		}
+
 		this.config = {
 			maxSteps: config.maxSteps ?? 40,
 			includeInitialTab: config.includeInitialTab ?? true,
 			experimentalIncludeAllTabs: config.experimentalIncludeAllTabs ?? false,
 			panopticUrl: config.panopticUrl ?? 'ws://127.0.0.1:8792/v1/panoptic/stream',
 			panopticToken: config.panopticToken,
-			panopticContextRounds: config.panopticContextRounds ?? 4096,
+			panopticContextRounds: config.panopticContextRounds ?? 32,
 			panopticMaxFrames: config.panopticMaxFrames ?? 4096,
-			panopticFps: Math.min(4, Math.max(0.5, config.panopticFps ?? 2)),
+			panopticFps: sampleFps,
+			panopticInferFps: inferFps,
+			panopticStandbyHighResFrames: config.panopticStandbyHighResFrames ?? 3,
 			maxPerceptionSecondsPerStep: Math.max(1, config.maxPerceptionSecondsPerStep ?? 8),
 			layaUrl: config.layaUrl ?? 'http://127.0.0.1:8791',
 		}
@@ -101,10 +113,10 @@ export class PanopticPageAgent extends EventTarget {
 		this.history = []
 		this.lastVisual = { summary: '', change: '', pageStable: false, targets: [] }
 		this.temporalEpoch = 0
-		this.lastTimestampByTab.clear()
-		this.closePanopticSessions()
+		this.timelineEventsByTab.clear()
+		await this.closeTemporalSessions()
 		this.abortController = new AbortController()
-		this.taskStartedAt = performance.now()
+		this.taskStartedAtEpochMs = Date.now()
 		const signal = this.abortController.signal
 
 		let resolveRunning!: () => void
@@ -112,8 +124,6 @@ export class PanopticPageAgent extends EventTarget {
 
 		this.setStatus('running')
 		this.emitHistory()
-		// Panoptic must see the real page. Explicitly suppress the legacy Page Agent
-		// interaction mask, which would otherwise become part of the visual stream.
 		await chrome.storage.local.set({ isAgentRunning: false })
 
 		let finalStatus: AgentStatus = 'error'
@@ -140,8 +150,6 @@ export class PanopticPageAgent extends EventTarget {
 				this.emitActivity({ type: 'thinking' })
 				const temporal = await this.observeUntilResponse(tabId, signal)
 
-				// Respect the streaming model's "not enough evidence yet" decision.
-				// No Laya decision is made from a Silence/Standby-only interval.
 				let action: VisualAction
 				if (!temporal) {
 					action = { kind: 'WAIT', confidence: 1 }
@@ -184,7 +192,14 @@ export class PanopticPageAgent extends EventTarget {
 
 				if (action.kind !== 'WAIT') {
 					this.temporalEpoch++
-					await new Promise((resolve) => setTimeout(resolve, 350))
+					const eventTimeMs = this.elapsedMs()
+					this.enqueueTimelineEvent(tabId, {
+						timeMs: eventTimeMs,
+						content: `Actuator executed ${action.kind}: ${executed.message}`,
+					})
+					// Do not let already-captured pre-action frames masquerade as
+					// post-action evidence.
+					this.captureByTab.get(tabId)?.discardBefore(eventTimeMs)
 				}
 			}
 
@@ -206,7 +221,7 @@ export class PanopticPageAgent extends EventTarget {
 			finalStatus = aborted ? 'stopped' : 'error'
 			return result
 		} finally {
-			this.closePanopticSessions()
+			await this.closeTemporalSessions()
 			resolveRunning()
 			this.setStatus(finalStatus)
 			await chrome.storage.local.set({ isAgentRunning: false }).catch(() => undefined)
@@ -216,7 +231,7 @@ export class PanopticPageAgent extends EventTarget {
 	async stop(): Promise<void> {
 		if (this.statusValue !== 'running') return
 		this.abortController.abort()
-		this.closePanopticSessions()
+		await this.closeTemporalSessions()
 		await this.running
 	}
 
@@ -224,10 +239,30 @@ export class PanopticPageAgent extends EventTarget {
 		if (this.disposed) return
 		this.disposed = true
 		this.abortController.abort()
-		this.closePanopticSessions()
+		void this.closeTemporalSessions()
 		this.tabsController.dispose()
 		void chrome.storage.local.set({ isAgentRunning: false })
 		this.dispatchEvent(new Event('dispose'))
+	}
+
+	private elapsedMs(): number {
+		return Math.max(0, Date.now() - this.taskStartedAtEpochMs)
+	}
+
+	private enqueueTimelineEvent(tabId: number, event: PanopticTimelineEvent): void {
+		const events = this.timelineEventsByTab.get(tabId) ?? []
+		events.push(event)
+		this.timelineEventsByTab.set(tabId, events)
+	}
+
+	private takeEventsThrough(tabId: number, throughMs: number): PanopticTimelineEvent[] {
+		const events = this.timelineEventsByTab.get(tabId) ?? []
+		const ready = events.filter((event) => event.timeMs <= throughMs)
+		this.timelineEventsByTab.set(
+			tabId,
+			events.filter((event) => event.timeMs > throughMs)
+		)
+		return ready
 	}
 
 	private async observeUntilResponse(
@@ -235,58 +270,40 @@ export class PanopticPageAgent extends EventTarget {
 		signal: AbortSignal
 	): Promise<PanopticTemporalState | null> {
 		const client = await this.getPanopticSession(tabId, signal)
-		const frameIntervalMs = Math.round(1000 / this.config.panopticFps)
+		const capture = await this.getCaptureSession(tabId)
+		const framesPerRound = Math.round(this.config.panopticFps / this.config.panopticInferFps)
+		const roundTimeoutMs = Math.ceil((framesPerRound / this.config.panopticFps) * 1500)
 		const deadline = performance.now() + this.config.maxPerceptionSecondsPerStep * 1000
-		const inFlight = new Set<Promise<PanopticTemporalState>>()
 		let latestResponse: PanopticTemporalState | null = null
-		let responseSeen = false
 
-		const track = (promise: Promise<PanopticTemporalState>) => {
-			inFlight.add(promise)
-			promise
-				.then((temporal) => {
-					if (temporal.state === 'response') {
-						latestResponse = temporal
-						responseSeen = true
-					}
-				})
-				.finally(() => inFlight.delete(promise))
-		}
-
-		while (performance.now() < deadline && !responseSeen) {
+		while (performance.now() < deadline) {
 			signal.throwIfAborted()
-			if (inFlight.size >= 8) {
-				await Promise.race(inFlight)
-				continue
-			}
+			const frames = await capture.nextBatch(framesPerRound, {
+				timeoutMs: roundTimeoutMs,
+				signal,
+			})
+			if (!frames.length) continue
 
-			const frameStarted = performance.now()
-			const imageBase64 = await captureViewport(tabId)
-			const elapsed = performance.now() - this.taskStartedAt
-			const previous = this.lastTimestampByTab.get(tabId) ?? -1
-			const timestampMs = Math.max(previous + 1, elapsed)
-			this.lastTimestampByTab.set(tabId, timestampMs)
-
-			track(
-				client.pushFrame({
-					frameId: crypto.randomUUID(),
-					epoch: this.temporalEpoch,
-					timestampMs,
-					durationMs: frameIntervalMs,
-					imageBase64,
-				})
-			)
-
-			const remaining = frameIntervalMs - (performance.now() - frameStarted)
-			if (remaining > 0) {
-				await new Promise((resolve) => setTimeout(resolve, remaining))
+			const lastFrame = frames[frames.length - 1]!
+			const temporal = await client.pushBatch({
+				epoch: this.temporalEpoch,
+				frames: frames.map((frame) => ({
+					frameId: frame.frameId,
+					timestampMs: frame.timestampMs,
+					durationMs: frame.durationMs,
+					imageBase64: frame.imageBase64,
+				})),
+				events: this.takeEventsThrough(
+					tabId,
+					lastFrame.timestampMs + lastFrame.durationMs
+				),
+			})
+			if (temporal.state === 'response') {
+				latestResponse = temporal
+				break
 			}
 		}
 
-		// Drain frames captured before the response boundary. This keeps the
-		// state used by Laya aligned to the latest pre-action visual evidence
-		// instead of acting while older frames are still queued in Panoptic.
-		if (inFlight.size) await Promise.all(inFlight)
 		return latestResponse
 	}
 
@@ -302,6 +319,7 @@ export class PanopticPageAgent extends EventTarget {
 			task: this.task,
 			contextRounds: this.config.panopticContextRounds,
 			maxFrames: this.config.panopticMaxFrames,
+			standbyHighResFrames: this.config.panopticStandbyHighResFrames,
 			signal,
 		})
 		await client.connect()
@@ -309,9 +327,32 @@ export class PanopticPageAgent extends EventTarget {
 		return client
 	}
 
-	private closePanopticSessions(): void {
+	private async getCaptureSession(tabId: number): Promise<TabMediaCapture> {
+		const existing = this.captureByTab.get(tabId)
+		if (existing) return existing
+
+		const capture = new TabMediaCapture({
+			sessionId: `${this.taskId}:${tabId}`,
+			tabId,
+			taskStartedAtEpochMs: this.taskStartedAtEpochMs,
+			fps: this.config.panopticFps,
+			// Keep enough source detail for the backend's Standby escalation.
+			// Normal rounds are down-budgeted server-side.
+			maxEdge: 896,
+			maxQueuedFrames: Math.max(16, Math.round(this.config.panopticFps * 4)),
+		})
+		await capture.start()
+		this.captureByTab.set(tabId, capture)
+		return capture
+	}
+
+	private async closeTemporalSessions(): Promise<void> {
 		for (const client of this.panopticByTab.values()) client.close()
 		this.panopticByTab.clear()
+
+		const captures = [...this.captureByTab.values()]
+		this.captureByTab.clear()
+		await Promise.allSettled(captures.map((capture) => capture.stop()))
 	}
 
 	private pushStep(step: number, action: VisualAction, output: string): void {
