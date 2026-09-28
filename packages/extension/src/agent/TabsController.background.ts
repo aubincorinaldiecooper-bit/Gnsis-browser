@@ -79,6 +79,34 @@ export function handleTabControlMessage(
 			return true // async response
 		}
 
+		case 'activate_tab': {
+			chrome.tabs
+				.update(payload.tabId, { active: true })
+				.then(() => sendResponse({ success: true }))
+				.catch((error) =>
+					sendResponse({ error: error instanceof Error ? error.message : String(error) })
+				)
+			return true
+		}
+
+		case 'capture_tab': {
+			chrome.tabs
+				.get(payload.tabId)
+				.then(async (tab) => {
+					if (tab.id == null || tab.windowId == null) throw new Error('Tab is missing id/windowId')
+					if (!tab.active) await chrome.tabs.update(tab.id, { active: true })
+					const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+						format: 'jpeg',
+						quality: 88,
+					})
+					sendResponse({ success: true, dataUrl })
+				})
+				.catch((error) =>
+					sendResponse({ error: error instanceof Error ? error.message : String(error) })
+				)
+			return true
+		}
+
 		case 'open_new_tab': {
 			debug('open_new_tab', payload)
 			chrome.tabs

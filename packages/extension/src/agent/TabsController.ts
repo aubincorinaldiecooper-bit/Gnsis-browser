@@ -174,6 +174,15 @@ export class TabsController {
 			throw new Error(`Tab ID ${tabId} not found in tab list.`)
 		}
 
+		const activated = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'activate_tab',
+			payload: { tabId },
+		})
+		if (!activated?.success) {
+			throw new Error(`Failed to activate tab ID ${tabId}: ${activated?.error || 'unknown error'}`)
+		}
+
 		await this.updateCurrentTabId(tabId)
 
 		return `✅ Switched to tab ID ${tabId}.`
@@ -273,6 +282,16 @@ export class TabsController {
 		}
 
 		return result
+	}
+
+	async snapshotTabs(): Promise<Array<{ id: number; current: boolean; title: string; url: string }>> {
+		await this.syncTabs()
+		return Promise.all(
+			this.tabs.map(async (tab) => {
+				const { title, url } = await this.getTabInfo(tab.id)
+				return { id: tab.id, current: this.currentTabId === tab.id, title, url }
+			})
+		)
 	}
 
 	async summarizeTabs(): Promise<string> {
@@ -402,6 +421,8 @@ export interface TabsInitOptions {
 export type TabAction =
 	| 'get_active_tab'
 	| 'get_tab_info'
+	| 'activate_tab'
+	| 'capture_tab'
 	| 'open_new_tab'
 	| 'create_tab_group'
 	| 'update_tab_group'

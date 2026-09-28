@@ -239,6 +239,65 @@ export class PageController extends EventTarget {
 	}
 
 	/**
+	 * Resolve a visual target chosen by Panoptic/Laya to the live element under
+	 * that viewport coordinate. This is actuator-only DOM use: the DOM is not
+	 * exposed as perception or model context.
+	 */
+	private getElementAtPoint(point: { x: number; y: number }): HTMLElement {
+		const normalizedX = Math.min(1, Math.max(0, point.x))
+		const normalizedY = Math.min(1, Math.max(0, point.y))
+		const x = Math.min(window.innerWidth - 1, Math.max(0, normalizedX * window.innerWidth))
+		const y = Math.min(window.innerHeight - 1, Math.max(0, normalizedY * window.innerHeight))
+		const hit = document.elementFromPoint(x, y)
+		if (!(hit instanceof HTMLElement)) {
+			throw new Error(`No HTMLElement found at visual point (${normalizedX.toFixed(3)}, ${normalizedY.toFixed(3)})`)
+		}
+		return hit
+	}
+
+	async clickPoint(point: { x: number; y: number }): Promise<ActionResult> {
+		try {
+			const element = this.getElementAtPoint(point)
+			await clickElement(element)
+			return { success: true, message: `✅ Clicked visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}).` }
+		} catch (error) {
+			return { success: false, message: `❌ Failed to click visual target: ${error}` }
+		}
+	}
+
+	async inputTextAtPoint(point: { x: number; y: number }, text: string): Promise<ActionResult> {
+		try {
+			let element = this.getElementAtPoint(point)
+			if (
+				!(element instanceof HTMLInputElement) &&
+				!(element instanceof HTMLTextAreaElement) &&
+				!element.isContentEditable
+			) {
+				const candidate = element.closest<HTMLElement>('input, textarea, [contenteditable="true"]')
+				if (candidate) element = candidate
+			}
+			await inputTextElement(element, text)
+			return { success: true, message: `✅ Typed into visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}).` }
+		} catch (error) {
+			return { success: false, message: `❌ Failed to type into visual target: ${error}` }
+		}
+	}
+
+	async scrollViewport(options: {
+		direction: 'up' | 'down'
+		amount: 'small' | 'page'
+	}): Promise<ActionResult> {
+		try {
+			const pixels = (options.amount === 'page' ? window.innerHeight * 0.9 : window.innerHeight * 0.35) *
+				(options.direction === 'down' ? 1 : -1)
+			const message = await scrollVertically(pixels)
+			return { success: true, message }
+		} catch (error) {
+			return { success: false, message: `❌ Failed to scroll viewport: ${error}` }
+		}
+	}
+
+	/**
 	 * Click element by index
 	 */
 	async clickElement(index: number): Promise<ActionResult> {
