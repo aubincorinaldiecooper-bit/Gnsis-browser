@@ -22,6 +22,8 @@ export interface BrowserDecisionRequest {
 		url?: string | null
 		direction?: 'up' | 'down' | null
 		viewport?: { width: number; height: number } | null
+		resolve_target?: boolean
+		max_radius_px?: number | null
 	}
 }
 
@@ -54,10 +56,7 @@ export class BrowserActionBridge {
 		switch (decision.action) {
 			case 'click': {
 				const point = normalizedPoint(decision)
-				const result = await this.page.clickPoint(point, {
-					resolveTarget: true,
-					maxRadiusPx: 24,
-				})
+				const result = await this.page.clickPoint(point, pointActionOptions(decision))
 				message = result.message
 				if (!result.success) throw new Error(result.message)
 				break
@@ -65,10 +64,7 @@ export class BrowserActionBridge {
 			case 'type': {
 				if (!decision.text) throw new Error('type requires text')
 				const point = normalizedPoint(decision)
-				const result = await this.page.inputTextAtPoint(point, decision.text, {
-					resolveTarget: true,
-					maxRadiusPx: 24,
-				})
+				const result = await this.page.inputTextAtPoint(point, decision.text, pointActionOptions(decision))
 				message = result.message
 				if (!result.success) throw new Error(result.message)
 				break
@@ -161,5 +157,16 @@ export function normalizedPoint(
 	return {
 		x: target.x / viewport.width,
 		y: target.y / viewport.height,
+	}
+}
+
+
+export function pointActionOptions(
+	decision: BrowserDecisionRequest['decision']
+): { resolveTarget: boolean; maxRadiusPx?: number } {
+	if (!decision.resolve_target) return { resolveTarget: false }
+	return {
+		resolveTarget: true,
+		maxRadiusPx: Math.min(24, Math.max(0, decision.max_radius_px ?? 24)),
 	}
 }
