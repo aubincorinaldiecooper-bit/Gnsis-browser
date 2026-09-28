@@ -139,8 +139,14 @@ export class RemotePageController {
 	async scrollViewport(options: {
 		direction: 'up' | 'down'
 		amount: 'small' | 'page'
+		fraction?: number
 	}): Promise<DomActionReturn> {
 		return this.remoteCallDomAction('scroll_viewport', [options])
+	}
+
+
+	async pressEscape(): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('press_escape', [])
 	}
 
 	async selectOption(...args: any[]): Promise<DomActionReturn> {
