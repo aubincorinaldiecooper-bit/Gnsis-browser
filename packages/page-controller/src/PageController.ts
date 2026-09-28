@@ -367,16 +367,49 @@ export class PageController extends EventTarget {
 	async scrollViewport(options: {
 		direction: 'up' | 'down'
 		amount: 'small' | 'page'
+		/** Optional exact viewport fraction for adapter parity. */
+		fraction?: number
 	}): Promise<ActionResult> {
 		try {
-			const pixels = (options.amount === 'page' ? window.innerHeight * 0.9 : window.innerHeight * 0.35) *
-				(options.direction === 'down' ? 1 : -1)
+			const fraction =
+				options.fraction == null
+					? options.amount === 'page'
+						? 0.9
+						: 0.35
+					: Math.min(1, Math.max(0, options.fraction))
+			const pixels = window.innerHeight * fraction * (options.direction === 'down' ? 1 : -1)
 			const message = await scrollVertically(pixels)
 			return { success: true, message }
 		} catch (error) {
 			return { success: false, message: `❌ Failed to scroll viewport: ${error}` }
 		}
 	}
+
+
+	/**
+	 * Best-effort browser recovery keystroke in the page context.
+	 * The browser adapter uses this before its bounded recovery click.
+	 */
+	async pressEscape(): Promise<ActionResult> {
+		try {
+			const active = document.activeElement
+			const target = active instanceof HTMLElement ? active : document.body
+			for (const type of ['keydown', 'keyup'] as const) {
+				target.dispatchEvent(
+					new KeyboardEvent(type, {
+						key: 'Escape',
+						code: 'Escape',
+						bubbles: true,
+						cancelable: true,
+					})
+				)
+			}
+			return { success: true, message: '✅ Sent Escape to the current page.' }
+		} catch (error) {
+			return { success: false, message: `❌ Failed to send Escape: ${error}` }
+		}
+	}
+
 
 	/**
 	 * Click element by index
