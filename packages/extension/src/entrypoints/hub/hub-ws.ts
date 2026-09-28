@@ -17,6 +17,7 @@ import type { ExecutionResult } from '@page-agent/core'
 import { useEffect, useRef, useState } from 'react'
 
 import type { ExtConfig } from '@/agent/useAgent'
+import type { BrowserDecisionRequest, BrowserDecisionResult } from '@/vision/BrowserActionBridge'
 
 // --- Protocol types ---
 
@@ -30,7 +31,11 @@ interface StopMessage {
 	type: 'stop'
 }
 
-type InboundMessage = ExecuteMessage | StopMessage
+interface BrowserActionMessage extends BrowserDecisionRequest {
+	type: 'browser.action'
+}
+
+type InboundMessage = ExecuteMessage | StopMessage | BrowserActionMessage
 
 interface ReadyMessage {
 	type: 'ready'
@@ -45,9 +50,14 @@ interface ResultMessage {
 interface ErrorMessage {
 	type: 'error'
 	message: string
+	call_id?: string
 }
 
-type OutboundMessage = ReadyMessage | ResultMessage | ErrorMessage
+interface BrowserActionResultMessage extends BrowserDecisionResult {
+	type: 'browser.action.result'
+}
+
+type OutboundMessage = ReadyMessage | ResultMessage | ErrorMessage | BrowserActionResultMessage
 
 export type HubWsState = 'connecting' | 'connected' | 'disconnected'
 
@@ -58,6 +68,7 @@ export interface HubWsHandlers {
 		task: string,
 		config?: Record<string, unknown>
 	) => Promise<{ success: boolean; data: string }>
+	onBrowserAction: (request: BrowserDecisionRequest) => Promise<BrowserDecisionResult>
 	onStop: () => void
 }
 
@@ -150,6 +161,9 @@ export class HubWs {
 			case 'execute':
 				this.#handleExecute(msg)
 				break
+			case 'browser.action':
+				this.#handleBrowserAction(msg)
+				break
 			case 'stop':
 				this.#handlers.onStop()
 				break
@@ -170,6 +184,33 @@ export class HubWs {
 		)
 		if (ok) this.#approved = true
 		return ok
+	}
+
+
+	async #handleBrowserAction(msg: BrowserActionMessage) {
+		if (this.#busy) {
+			this.#send({
+				type: 'error',
+				call_id: msg.call_id,
+				message: 'Hub is busy with another action',
+			})
+			return
+		}
+
+		this.#busy = true
+		try {
+			const { type: _type, ...request } = msg
+			const result = await this.#handlers.onBrowserAction(request)
+			this.#send({ type: 'browser.action.result', ...result })
+		} catch (err) {
+			this.#send({
+				type: 'error',
+				call_id: msg.call_id,
+				message: err instanceof Error ? err.message : String(err),
+			})
+		} finally {
+			this.#busy = false
+		}
 	}
 
 	async #handleExecute(msg: ExecuteMessage) {
@@ -200,15 +241,16 @@ export function useHubWs(
 	execute: (task: string) => Promise<ExecutionResult>,
 	stop: () => void,
 	configure: (config: ExtConfig) => Promise<void>,
-	config: ExtConfig | null
+	config: ExtConfig | null,
+	executeBrowserAction: (request: BrowserDecisionRequest) => Promise<BrowserDecisionResult>
 ): { wsState: HubWsState } {
 	const wsPort = new URLSearchParams(location.search).get('ws')
 	const [wsState, setWsState] = useState<HubWsState>(() => (wsPort ? 'connecting' : 'disconnected'))
 	const hubWsRef = useRef<HubWs | null>(null)
 
-	const latestRef = useRef({ execute, stop, configure, config })
+	const latestRef = useRef({ execute, stop, configure, config, executeBrowserAction })
 	useEffect(() => {
-		latestRef.current = { execute, stop, configure, config }
+		latestRef.current = { execute, stop, configure, config, executeBrowserAction }
 	})
 
 	useEffect(() => {
@@ -225,6 +267,7 @@ export function useHubWs(
 					const result = await execute(task)
 					return { success: result.success, data: result.data }
 				},
+				onBrowserAction: (request) => latestRef.current.executeBrowserAction(request),
 				onStop: () => latestRef.current.stop(),
 			},
 			setWsState
