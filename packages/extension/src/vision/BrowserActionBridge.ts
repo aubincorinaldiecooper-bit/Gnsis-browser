@@ -45,8 +45,31 @@ export interface BrowserDecisionResult {
 export class BrowserActionBridge {
 	private readonly tabs = new TabsController()
 	private readonly page = new RemotePageController(this.tabs)
+	private readonly completed = new Map<string, BrowserDecisionResult>()
+	private readonly inFlight = new Map<string, Promise<BrowserDecisionResult>>()
+
 	async execute(request: BrowserDecisionRequest): Promise<BrowserDecisionResult> {
 		if (!request.call_id) throw new Error('browser action requires call_id')
+		const completed = this.completed.get(request.call_id)
+		if (completed) return { ...completed }
+		const active = this.inFlight.get(request.call_id)
+		if (active) return active
+		const execution = this.executeOnce(request)
+		this.inFlight.set(request.call_id, execution)
+		try {
+			const result = await execution
+			this.completed.set(request.call_id, result)
+			if (this.completed.size > 256) {
+				const oldest = this.completed.keys().next().value
+				if (oldest !== undefined) this.completed.delete(oldest)
+			}
+			return result
+		} finally {
+			this.inFlight.delete(request.call_id)
+		}
+	}
+
+	private async executeOnce(request: BrowserDecisionRequest): Promise<BrowserDecisionResult> {
 		await this.ensureAttached()
 
 		const decision = request.decision
