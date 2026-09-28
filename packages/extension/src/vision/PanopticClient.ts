@@ -9,6 +9,7 @@ interface ReadyMessage {
 	max_frames: number
 	normal_max_pixels: number
 	standby_max_pixels: number
+	standby_high_res_frames: number
 }
 
 interface ErrorMessage {
@@ -22,9 +23,16 @@ type ServerMessage =
 	| ErrorMessage
 	| { type: 'done'; [key: string]: unknown }
 
-interface PendingFrame {
-	resolve: (state: PanopticTemporalState) => void
-	reject: (error: Error) => void
+export interface PanopticFrameInput {
+	frameId: string
+	timestampMs: number
+	durationMs: number
+	imageBase64: string
+}
+
+export interface PanopticTimelineEvent {
+	timeMs: number
+	content: string
 }
 
 export interface PanopticSessionConfig {
@@ -36,6 +44,7 @@ export interface PanopticSessionConfig {
 	contextRounds?: number
 	maxFrames?: number
 	maxTokens?: number
+	standbyHighResFrames?: number
 	signal?: AbortSignal
 }
 
@@ -48,8 +57,10 @@ export class PanopticClient {
 	private readyPromise: Promise<ReadyMessage> | null = null
 	private readyResolve: ((ready: ReadyMessage) => void) | null = null
 	private readyReject: ((error: Error) => void) | null = null
-	private pending = new Map<string, PendingFrame>()
-	private maxPendingFrames = 8
+	private responseQueue: Array<{
+		resolve: (state: PanopticTemporalState) => void
+		reject: (error: Error) => void
+	}> = []
 	private closed = false
 	private config: PanopticSessionConfig
 
@@ -89,9 +100,10 @@ export class PanopticClient {
 					session_id: this.config.sessionId,
 					tab_id: this.config.tabId,
 					task: this.config.task,
-					context_rounds: this.config.contextRounds ?? 4096,
+					context_rounds: this.config.contextRounds ?? 32,
 					max_frames: this.config.maxFrames ?? 4096,
 					max_tokens: this.config.maxTokens ?? 192,
+					standby_high_res_frames: this.config.standbyHighResFrames ?? 3,
 				})
 			)
 		})
@@ -113,33 +125,36 @@ export class PanopticClient {
 		return this.readyPromise
 	}
 
-	async pushFrame(input: {
-		frameId: string
+	async pushBatch(input: {
 		epoch: number
-		timestampMs: number
-		durationMs: number
-		imageBase64: string
+		frames: PanopticFrameInput[]
+		events?: PanopticTimelineEvent[]
 	}): Promise<PanopticTemporalState> {
 		await this.connect()
 		if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
 			throw new Error('Panoptic websocket is not open')
 		}
-		if (this.pending.size >= this.maxPendingFrames) {
-			throw new Error(
-				`Panoptic backpressure limit reached (${this.maxPendingFrames} frames in flight)`
-			)
+		if (!input.frames.length) throw new Error('Panoptic batch requires at least one frame')
+		if (this.responseQueue.length > 0) {
+			throw new Error('Panoptic inference round already in flight')
 		}
 
 		return new Promise<PanopticTemporalState>((resolve, reject) => {
-			this.pending.set(input.frameId, { resolve, reject })
+			this.responseQueue.push({ resolve, reject })
 			this.socket!.send(
 				JSON.stringify({
-					type: 'frame',
-					frame_id: input.frameId,
+					type: 'batch',
 					epoch: input.epoch,
-					timestamp_ms: input.timestampMs,
-					duration_ms: input.durationMs,
-					image_base64: input.imageBase64,
+					frames: input.frames.map((frame) => ({
+						frame_id: frame.frameId,
+						timestamp_ms: frame.timestampMs,
+						duration_ms: frame.durationMs,
+						image_base64: frame.imageBase64,
+					})),
+					events: (input.events ?? []).map((event) => ({
+						time_ms: event.timeMs,
+						content: event.content,
+					})),
 				})
 			)
 		})
@@ -172,29 +187,27 @@ export class PanopticClient {
 				return
 			}
 			if (message.type === 'temporal_state') {
-				const pending = this.pending.get(message.frame_id)
-				if (!pending) return
-				this.pending.delete(message.frame_id)
-				pending.resolve(message)
+				const pending = this.responseQueue.shift()
+				pending?.resolve(message)
 				return
 			}
 			if (message.type === 'done') {
-				this.failPendingFrames(new Error('Panoptic stream ended'))
+				this.failPending(new Error('Panoptic stream ended'))
 			}
 		} catch (error) {
 			this.failAll(error instanceof Error ? error : new Error(String(error)))
 		}
 	}
 
-	private failPendingFrames(error: Error): void {
-		for (const { reject } of this.pending.values()) reject(error)
-		this.pending.clear()
+	private failPending(error: Error): void {
+		for (const { reject } of this.responseQueue) reject(error)
+		this.responseQueue = []
 	}
 
 	private failAll(error: Error): void {
 		this.readyReject?.(error)
 		this.readyResolve = null
 		this.readyReject = null
-		this.failPendingFrames(error)
+		this.failPending(error)
 	}
 }
