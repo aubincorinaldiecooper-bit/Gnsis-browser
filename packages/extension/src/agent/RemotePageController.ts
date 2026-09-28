@@ -1,4 +1,4 @@
-import type { BrowserState } from '@page-agent/page-controller'
+import type { BrowserState, PointActionOptions } from '@page-agent/page-controller'
 
 import type { TabsController } from './TabsController'
 
@@ -121,15 +121,19 @@ export class RemotePageController {
 		return this.remoteCallDomAction('input_text', args)
 	}
 
-	async clickPoint(point: { x: number; y: number }): Promise<DomActionReturn> {
-		return this.remoteCallDomAction('click_point', [point])
+	async clickPoint(
+		point: { x: number; y: number },
+		options: PointActionOptions = {}
+	): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('click_point', [point, options])
 	}
 
 	async inputTextAtPoint(
 		point: { x: number; y: number },
-		text: string
+		text: string,
+		options: PointActionOptions = {}
 	): Promise<DomActionReturn> {
-		return this.remoteCallDomAction('input_text_at_point', [point, text])
+		return this.remoteCallDomAction('input_text_at_point', [point, text, options])
 	}
 
 	async scrollViewport(options: {
@@ -145,9 +149,10 @@ export class RemotePageController {
 
 	async selectOptionAtPoint(
 		point: { x: number; y: number },
-		optionText: string
+		optionText: string,
+		options: PointActionOptions = {}
 	): Promise<DomActionReturn> {
-		return this.remoteCallDomAction('select_option_at_point', [point, optionText])
+		return this.remoteCallDomAction('select_option_at_point', [point, optionText, options])
 	}
 
 	async scroll(...args: any[]): Promise<DomActionReturn> {

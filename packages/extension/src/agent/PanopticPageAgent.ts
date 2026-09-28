@@ -29,6 +29,12 @@ export interface PanopticPageAgentConfig {
 	panopticStandbyHighResFrames?: number
 	maxPerceptionSecondsPerStep?: number
 	layaUrl?: string
+	/**
+	 * Browser-only execution cleanup. DOM stays out of Panoptic/Laya context.
+	 * Disabled by default until live end-to-end validation is complete.
+	 */
+	actuatorTargetResolution?: boolean
+	actuatorTargetResolutionRadiusPx?: number
 }
 
 /**
@@ -67,7 +73,7 @@ export class PanopticPageAgent extends EventTarget {
 	private tabsController = new TabsController()
 	private pageController = new RemotePageController(this.tabsController)
 	private laya: LayaClient
-	private actuator = new VisualActuator(this.pageController, this.tabsController)
+	private actuator: VisualActuator
 
 	constructor(config: PanopticPageAgentConfig = {}) {
 		super()
@@ -91,8 +97,17 @@ export class PanopticPageAgent extends EventTarget {
 			panopticStandbyHighResFrames: config.panopticStandbyHighResFrames ?? 3,
 			maxPerceptionSecondsPerStep: Math.max(1, config.maxPerceptionSecondsPerStep ?? 8),
 			layaUrl: config.layaUrl ?? 'http://127.0.0.1:8791',
+			actuatorTargetResolution: config.actuatorTargetResolution ?? false,
+			actuatorTargetResolutionRadiusPx: Math.min(
+				24,
+				Math.max(0, config.actuatorTargetResolutionRadiusPx ?? 24)
+			),
 		}
 		this.laya = new LayaClient({ baseUrl: this.config.layaUrl })
+		this.actuator = new VisualActuator(this.pageController, this.tabsController, {
+			targetResolution: this.config.actuatorTargetResolution,
+			targetResolutionRadiusPx: this.config.actuatorTargetResolutionRadiusPx,
+		})
 	}
 
 	get status(): AgentStatus {
