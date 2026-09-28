@@ -65,6 +65,37 @@ export function handleTabControlMessage(
 			return true // async response
 		}
 
+
+		case 'navigate_current': {
+			chrome.tabs
+				.update(payload.tabId, { url: payload.url })
+				.then(() => sendResponse({ success: true }))
+				.catch((error) =>
+					sendResponse({ error: error instanceof Error ? error.message : String(error) })
+				)
+			return true
+		}
+
+		case 'go_back': {
+			chrome.tabs
+				.goBack(payload.tabId)
+				.then(() => sendResponse({ success: true }))
+				.catch((error) =>
+					sendResponse({ error: error instanceof Error ? error.message : String(error) })
+				)
+			return true
+		}
+
+		case 'reload_current': {
+			chrome.tabs
+				.reload(payload.tabId)
+				.then(() => sendResponse({ success: true }))
+				.catch((error) =>
+					sendResponse({ error: error instanceof Error ? error.message : String(error) })
+				)
+			return true
+		}
+
 		case 'get_tab_info': {
 			debug('get_tab_info', payload)
 			chrome.tabs
