@@ -1,5 +1,6 @@
 import { handlePageControlMessage } from '@/agent/RemotePageController.background'
 import { handleTabControlMessage } from '@/agent/TabsController.background'
+import { handlePanopticCaptureMessage } from '@/vision/PanopticCapture.background'
 
 export default defineBackground(() => {
 	console.log('[Background] Service Worker started')
@@ -20,10 +21,13 @@ export default defineBackground(() => {
 			return handleTabControlMessage(message, sender, sendResponse)
 		} else if (message.type === 'PAGE_CONTROL') {
 			return handlePageControlMessage(message, sender, sendResponse)
-		} else {
-			sendResponse({ error: 'Unknown message type' })
-			return
+		} else if (message.type === 'PANOPTIC_CAPTURE') {
+			return handlePanopticCaptureMessage(message, sender, sendResponse)
 		}
+
+		// Other extension contexts (notably the Panoptic offscreen document)
+		// have their own runtime listeners. Do not answer messages we do not own.
+		return
 	})
 
 	// external messages (from localhost launcher page via externally_connectable)

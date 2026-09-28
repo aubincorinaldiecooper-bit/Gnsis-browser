@@ -37,13 +37,13 @@ export default defineContentScript({
 })
 
 async function exposeAgentToPage() {
-	const { MultiPageAgent } = await import('@/agent/MultiPageAgent')
-	console.log('[PageAgentExt]: MultiPageAgent loaded')
+	const { PanopticPageAgent } = await import('@/agent/PanopticPageAgent')
+	console.log('[PageAgentExt]: PanopticPageAgent loaded')
 
 	/**
 	 * singleton MultiPageAgent to handle requests from the page
 	 */
-	let multiPageAgent: InstanceType<typeof MultiPageAgent> | null = null
+	let multiPageAgent: InstanceType<typeof PanopticPageAgent> | null = null
 
 	window.addEventListener('message', async (e) => {
 		if (e.source !== window) return
@@ -72,15 +72,12 @@ async function exposeAgentToPage() {
 
 				try {
 					const { task, config } = payload
-					const { systemInstruction, ...agentConfig } = config
+					const agentConfig = config ?? {}
 
 					// Dispose old instance before creating new one
 					multiPageAgent?.dispose()
 
-					multiPageAgent = new MultiPageAgent({
-						...agentConfig,
-						instructions: systemInstruction ? { system: systemInstruction } : undefined,
-					})
+					multiPageAgent = new PanopticPageAgent(agentConfig)
 
 					// events
 

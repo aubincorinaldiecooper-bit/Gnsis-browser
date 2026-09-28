@@ -121,8 +121,33 @@ export class RemotePageController {
 		return this.remoteCallDomAction('input_text', args)
 	}
 
+	async clickPoint(point: { x: number; y: number }): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('click_point', [point])
+	}
+
+	async inputTextAtPoint(
+		point: { x: number; y: number },
+		text: string
+	): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('input_text_at_point', [point, text])
+	}
+
+	async scrollViewport(options: {
+		direction: 'up' | 'down'
+		amount: 'small' | 'page'
+	}): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('scroll_viewport', [options])
+	}
+
 	async selectOption(...args: any[]): Promise<DomActionReturn> {
 		return this.remoteCallDomAction('select_option', args)
+	}
+
+	async selectOptionAtPoint(
+		point: { x: number; y: number },
+		optionText: string
+	): Promise<DomActionReturn> {
+		return this.remoteCallDomAction('select_option_at_point', [point, optionText])
 	}
 
 	async scroll(...args: any[]): Promise<DomActionReturn> {

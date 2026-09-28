@@ -77,10 +77,14 @@ export function initPageController() {
 			case 'update_tree':
 			case 'clean_up_highlights':
 			case 'click_element':
+			case 'click_point':
 			case 'input_text':
+			case 'input_text_at_point':
 			case 'select_option':
+			case 'select_option_at_point':
 			case 'scroll':
 			case 'scroll_horizontally':
+			case 'scroll_viewport':
 			case 'execute_javascript':
 				pc[methodName](...(payload || []))
 					.then((result: any) => sendResponse(result))
@@ -118,14 +122,22 @@ function getMethodName(action: string): string {
 
 		case 'click_element':
 			return 'clickElement' as const
+		case 'click_point':
+			return 'clickPoint' as const
 		case 'input_text':
 			return 'inputText' as const
+		case 'input_text_at_point':
+			return 'inputTextAtPoint' as const
 		case 'select_option':
 			return 'selectOption' as const
+		case 'select_option_at_point':
+			return 'selectOptionAtPoint' as const
 		case 'scroll':
 			return 'scroll' as const
 		case 'scroll_horizontally':
 			return 'scrollHorizontally' as const
+		case 'scroll_viewport':
+			return 'scrollViewport' as const
 		case 'execute_javascript':
 			return 'executeJavascript' as const
 

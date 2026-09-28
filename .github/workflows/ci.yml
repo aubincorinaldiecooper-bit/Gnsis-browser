@@ -25,3 +25,6 @@ jobs:
 
       - name: CI checks
         run: node scripts/ci.js
+
+      - name: Panoptic syntax check
+        run: python3 -m py_compile services/panoptic/panoptic_stream.py

@@ -11,7 +11,7 @@ import type {
 import type { LLMConfig } from '@page-agent/llms'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { MultiPageAgent } from './MultiPageAgent'
+import { PanopticPageAgent } from './PanopticPageAgent'
 import { DEMO_CONFIG, migrateLegacyEndpoint } from './constants'
 
 /** Language preference: undefined means follow system */
@@ -23,6 +23,15 @@ export interface AdvancedConfig {
 	experimentalLlmsTxt?: boolean
 	experimentalIncludeAllTabs?: boolean
 	disableNamedToolChoice?: boolean
+	panopticUrl?: string
+	panopticToken?: string
+	panopticContextRounds?: number
+	panopticMaxFrames?: number
+	panopticFps?: number
+	panopticInferFps?: number
+	panopticStandbyHighResFrames?: number
+	maxPerceptionSecondsPerStep?: number
+	layaUrl?: string
 }
 
 export interface ExtConfig extends LLMConfig, AdvancedConfig {
@@ -41,7 +50,7 @@ export interface UseAgentResult {
 }
 
 export function useAgent(): UseAgentResult {
-	const agentRef = useRef<MultiPageAgent | null>(null)
+	const agentRef = useRef<PanopticPageAgent | null>(null)
 	const [status, setStatus] = useState<AgentStatus>('idle')
 	const [history, setHistory] = useState<HistoricalEvent[]>([])
 	const [activity, setActivity] = useState<AgentActivity | null>(null)
@@ -70,10 +79,18 @@ export function useAgent(): UseAgentResult {
 	useEffect(() => {
 		if (!config) return
 
-		const { systemInstruction, ...agentConfig } = config
-		const agent = new MultiPageAgent({
-			...agentConfig,
-			instructions: systemInstruction ? { system: systemInstruction } : undefined,
+		const agent = new PanopticPageAgent({
+			maxSteps: config.maxSteps,
+			experimentalIncludeAllTabs: config.experimentalIncludeAllTabs,
+			panopticUrl: config.panopticUrl,
+			panopticToken: config.panopticToken,
+			panopticContextRounds: config.panopticContextRounds,
+			panopticMaxFrames: config.panopticMaxFrames,
+			panopticFps: config.panopticFps,
+			panopticInferFps: config.panopticInferFps,
+			panopticStandbyHighResFrames: config.panopticStandbyHighResFrames,
+			maxPerceptionSecondsPerStep: config.maxPerceptionSecondsPerStep,
+			layaUrl: config.layaUrl,
 		})
 		agentRef.current = agent
 
@@ -127,6 +144,15 @@ export function useAgent(): UseAgentResult {
 			experimentalLlmsTxt,
 			experimentalIncludeAllTabs,
 			disableNamedToolChoice,
+			panopticUrl,
+			panopticToken,
+			panopticContextRounds,
+			panopticMaxFrames,
+			panopticFps,
+			panopticInferFps,
+			panopticStandbyHighResFrames,
+			maxPerceptionSecondsPerStep,
+			layaUrl,
 			...llmConfig
 		}: ExtConfig) => {
 			await chrome.storage.local.set({ llmConfig })
@@ -141,6 +167,15 @@ export function useAgent(): UseAgentResult {
 				experimentalLlmsTxt,
 				experimentalIncludeAllTabs,
 				disableNamedToolChoice,
+				panopticUrl,
+				panopticToken,
+				panopticContextRounds,
+				panopticMaxFrames,
+				panopticFps,
+				panopticInferFps,
+				panopticStandbyHighResFrames,
+				maxPerceptionSecondsPerStep,
+				layaUrl,
 			}
 			await chrome.storage.local.set({ advancedConfig })
 			setConfig({ ...llmConfig, ...advancedConfig, language })
