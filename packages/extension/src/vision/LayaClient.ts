@@ -17,10 +17,16 @@ export interface LayaClientConfig {
 	minConfidence?: number
 }
 
+type UnconfidentAction = VisualAction extends infer Action
+	? Action extends { confidence: number }
+		? Omit<Action, 'confidence'>
+		: never
+	: never
+
 interface ActionCandidate {
 	key: string
 	label: string
-	action: Omit<VisualAction, 'confidence'>
+	action: UnconfidentAction
 }
 
 function jsonObject(text: string): Record<string, unknown> | null {
