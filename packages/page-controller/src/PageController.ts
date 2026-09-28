@@ -283,6 +283,26 @@ export class PageController extends EventTarget {
 		}
 	}
 
+	async selectOptionAtPoint(
+		point: { x: number; y: number },
+		optionText: string
+	): Promise<ActionResult> {
+		try {
+			let element = this.getElementAtPoint(point)
+			if (!(element instanceof HTMLSelectElement)) {
+				const candidate = element.closest('select')
+				if (candidate instanceof HTMLSelectElement) element = candidate
+			}
+			if (!(element instanceof HTMLSelectElement)) {
+				throw new Error('Visual target is not a select element')
+			}
+			await selectOptionElement(element, optionText)
+			return { success: true, message: `✅ Selected option (${optionText}) at visual target.` }
+		} catch (error) {
+			return { success: false, message: `❌ Failed to select visual target: ${error}` }
+		}
+	}
+
 	async scrollViewport(options: {
 		direction: 'up' | 'down'
 		amount: 'small' | 'page'
