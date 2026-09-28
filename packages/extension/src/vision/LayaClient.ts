@@ -130,6 +130,15 @@ function actionCandidates(context: DecisionContext): ActionCandidate[] {
 				})
 			}
 		}
+		if (affordances.has('SELECT') || target.role === 'select') {
+			for (let index = 0; index < texts.length; index++) {
+				result.push({
+					key: `select:${target.id}:${index}`,
+					label: `Select "${texts[index]}" in "${target.label || target.id}"`,
+					action: { kind: 'SELECT', target, optionText: texts[index] },
+				})
+			}
+		}
 	}
 
 	result.push(
@@ -147,6 +156,16 @@ function actionCandidates(context: DecisionContext): ActionCandidate[] {
 			key: 'scroll:up:small',
 			label: 'Scroll up a small amount',
 			action: { kind: 'SCROLL', direction: 'up', amount: 'small' },
+		},
+		{
+			key: 'scroll-horizontal:right',
+			label: 'Scroll horizontally to the right',
+			action: { kind: 'SCROLL_HORIZONTAL', direction: 'right', pixels: 480 },
+		},
+		{
+			key: 'scroll-horizontal:left',
+			label: 'Scroll horizontally to the left',
+			action: { kind: 'SCROLL_HORIZONTAL', direction: 'left', pixels: 480 },
 		}
 	)
 
@@ -173,6 +192,11 @@ function actionCandidates(context: DecisionContext): ActionCandidate[] {
 				key: `switch:${tab.id}`,
 				label: `Switch to tab ${tab.id}: ${tab.title || tab.url}`,
 				action: { kind: 'SWITCH_TAB', tabId: tab.id },
+			})
+			result.push({
+				key: `close:${tab.id}`,
+				label: `Close tab ${tab.id}: ${tab.title || tab.url}`,
+				action: { kind: 'CLOSE_TAB', tabId: tab.id },
 			})
 		}
 	}
