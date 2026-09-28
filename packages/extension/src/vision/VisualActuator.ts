@@ -24,6 +24,13 @@ export class VisualActuator {
 				const result = await this.pageController.inputTextAtPoint(action.target.point, action.text)
 				return { done: false, message: result.message }
 			}
+			case 'SELECT': {
+				const result = await this.pageController.selectOptionAtPoint(
+					action.target.point,
+					action.optionText
+				)
+				return { done: false, message: result.message }
+			}
 			case 'SCROLL': {
 				const result = await this.pageController.scrollViewport({
 					direction: action.direction,
@@ -31,10 +38,19 @@ export class VisualActuator {
 				})
 				return { done: false, message: result.message }
 			}
+			case 'SCROLL_HORIZONTAL': {
+				const result = await this.pageController.scrollHorizontally({
+					right: action.direction === 'right',
+					pixels: action.pixels,
+				})
+				return { done: false, message: result.message }
+			}
 			case 'OPEN_URL':
 				return { done: false, message: await this.tabsController.openNewTab(action.url) }
 			case 'SWITCH_TAB':
 				return { done: false, message: await this.tabsController.switchToTab(action.tabId) }
+			case 'CLOSE_TAB':
+				return { done: false, message: await this.tabsController.closeTab(action.tabId) }
 			case 'WAIT':
 				await new Promise((resolve) => setTimeout(resolve, 500))
 				return { done: false, message: 'Waited for Panoptic to accumulate more evidence.' }
