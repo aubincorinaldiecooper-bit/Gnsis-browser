@@ -422,7 +422,6 @@ export type TabAction =
 	| 'get_active_tab'
 	| 'get_tab_info'
 	| 'activate_tab'
-	| 'capture_tab'
 	| 'open_new_tab'
 	| 'create_tab_group'
 	| 'update_tab_group'
