@@ -234,6 +234,43 @@ export class TabsController {
 		return `✅ Opened new tab ID ${tabId} with URL ${url}`
 	}
 
+
+	async navigateCurrent(url: string, options: { signal?: AbortSignal } = {}): Promise<string> {
+		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
+		const result = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'navigate_current',
+			payload: { tabId: this.currentTabId, url },
+		})
+		if (!result?.success) throw new Error(result?.error || 'Failed to navigate current tab')
+		await this.waitUntilTabLoaded(this.currentTabId, options)
+		return `✅ Navigated current tab to ${url}`
+	}
+
+	async goBack(options: { signal?: AbortSignal } = {}): Promise<string> {
+		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
+		const result = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'go_back',
+			payload: { tabId: this.currentTabId },
+		})
+		if (!result?.success) throw new Error(result?.error || 'Failed to go back')
+		await this.waitUntilTabLoaded(this.currentTabId, options)
+		return '✅ Went back in the current tab.'
+	}
+
+	async reloadCurrent(options: { signal?: AbortSignal } = {}): Promise<string> {
+		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
+		const result = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'reload_current',
+			payload: { tabId: this.currentTabId },
+		})
+		if (!result?.success) throw new Error(result?.error || 'Failed to reload current tab')
+		await this.waitUntilTabLoaded(this.currentTabId, options)
+		return '✅ Reloaded the current tab.'
+	}
+
 	async switchToTab(tabId: number): Promise<string> {
 		debug('switchToTab', tabId)
 
@@ -488,6 +525,9 @@ export interface TabsInitOptions {
 
 export type TabAction =
 	| 'get_active_tab'
+	| 'navigate_current'
+	| 'go_back'
+	| 'reload_current'
 	| 'get_tab_info'
 	| 'activate_tab'
 	| 'open_new_tab'
