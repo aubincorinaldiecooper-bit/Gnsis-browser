@@ -81,6 +81,7 @@ export function initPageController() {
 			case 'input_text':
 			case 'input_text_at_point':
 			case 'select_option':
+			case 'select_option_at_point':
 			case 'scroll':
 			case 'scroll_horizontally':
 			case 'scroll_viewport':
@@ -129,6 +130,8 @@ function getMethodName(action: string): string {
 			return 'inputTextAtPoint' as const
 		case 'select_option':
 			return 'selectOption' as const
+		case 'select_option_at_point':
+			return 'selectOptionAtPoint' as const
 		case 'scroll':
 			return 'scroll' as const
 		case 'scroll_horizontally':
