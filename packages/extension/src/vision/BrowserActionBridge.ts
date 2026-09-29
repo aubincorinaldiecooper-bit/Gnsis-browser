@@ -20,10 +20,20 @@ export type BrowserDecisionAction =
 	| 'switch_tab'
 	| 'close_tab'
 
+export interface BrowserActionAuthority {
+	turn_id: string
+	provenance: 'direct_user' | 'mixed' | 'observed_untrusted' | 'delegated_result' | 'unknown'
+	policy_decision: 'allow' | 'confirm' | 'deny'
+	policy_reason: string
+	capability_manifest_id: string
+	confirmation: 'not_required' | 'approved' | 'denied' | 'missing'
+}
+
 export interface BrowserDecisionRequest {
 	call_id: string
 	frame_id?: string | number | null
 	source_tab_id?: number | null
+	authority: BrowserActionAuthority
 	decision: {
 		action: BrowserDecisionAction
 		confidence?: number
@@ -400,6 +410,7 @@ export function pointActionOptions(
 
 function validateRequest(request: BrowserDecisionRequest): void {
 	if (!request.call_id?.trim()) throw new Error('browser action requires call_id')
+	validateAuthority(request.authority)
 	if (!ACTIONS.has(request.decision.action)) {
 		throw new Error(`unsupported browser action: ${String(request.decision.action)}`)
 	}
@@ -408,6 +419,39 @@ function validateRequest(request: BrowserDecisionRequest): void {
 		(!Number.isInteger(request.source_tab_id) || request.source_tab_id <= 0)
 	) {
 		throw new Error('source_tab_id must be a positive integer')
+	}
+}
+
+function validateAuthority(authority: BrowserActionAuthority | null | undefined): void {
+	if (!authority || typeof authority !== 'object') {
+		throw new Error('browser action requires trusted user-intent authority')
+	}
+	for (const [name, value] of [
+		['turn_id', authority.turn_id],
+		['policy_reason', authority.policy_reason],
+		['capability_manifest_id', authority.capability_manifest_id],
+	] as const) {
+		if (typeof value !== 'string' || !value.trim()) {
+			throw new Error(`browser action authority requires ${name}`)
+		}
+	}
+	if (!['direct_user', 'mixed', 'observed_untrusted', 'delegated_result', 'unknown'].includes(authority.provenance)) {
+		throw new Error('browser action authority has invalid provenance')
+	}
+	if (!['allow', 'confirm', 'deny'].includes(authority.policy_decision)) {
+		throw new Error('browser action authority has invalid policy_decision')
+	}
+	if (!['not_required', 'approved', 'denied', 'missing'].includes(authority.confirmation)) {
+		throw new Error('browser action authority has invalid confirmation state')
+	}
+	if (authority.policy_decision === 'deny') {
+		throw new Error(`browser action blocked by policy: ${authority.policy_reason}`)
+	}
+	if (authority.policy_decision === 'confirm' && authority.confirmation !== 'approved') {
+		throw new Error('browser action requires an approved confirmation')
+	}
+	if (authority.policy_decision === 'allow' && !['not_required', 'approved'].includes(authority.confirmation)) {
+		throw new Error('browser action authority does not permit execution')
 	}
 }
 
