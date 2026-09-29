@@ -26,6 +26,7 @@ export interface BrowserActionAuthority {
 	policy_decision: 'allow' | 'confirm' | 'deny'
 	policy_reason: string
 	capability_manifest_id: string
+	allowed_actions: BrowserDecisionAction[]
 	confirmation: 'not_required' | 'approved' | 'denied' | 'missing'
 }
 
@@ -414,6 +415,7 @@ function validateRequest(request: BrowserDecisionRequest): void {
 	if (!ACTIONS.has(request.decision.action)) {
 		throw new Error(`unsupported browser action: ${String(request.decision.action)}`)
 	}
+	assertAuthorizedAction(request)
 	if (
 		request.source_tab_id != null &&
 		(!Number.isInteger(request.source_tab_id) || request.source_tab_id <= 0)
@@ -444,6 +446,12 @@ function validateAuthority(authority: BrowserActionAuthority | null | undefined)
 	if (!['not_required', 'approved', 'denied', 'missing'].includes(authority.confirmation)) {
 		throw new Error('browser action authority has invalid confirmation state')
 	}
+	if (!Array.isArray(authority.allowed_actions) || authority.allowed_actions.length === 0) {
+		throw new Error('browser action authority requires allowed_actions')
+	}
+	if (!authority.allowed_actions.every((action) => ACTIONS.has(action))) {
+		throw new Error('browser action authority has an invalid allowed action')
+	}
 	if (authority.policy_decision === 'deny') {
 		throw new Error(`browser action blocked by policy: ${authority.policy_reason}`)
 	}
@@ -452,6 +460,14 @@ function validateAuthority(authority: BrowserActionAuthority | null | undefined)
 	}
 	if (authority.policy_decision === 'allow' && !['not_required', 'approved'].includes(authority.confirmation)) {
 		throw new Error('browser action authority does not permit execution')
+	}
+}
+
+function assertAuthorizedAction(request: BrowserDecisionRequest): void {
+	if (!request.authority.allowed_actions.includes(request.decision.action)) {
+		throw new Error(
+			`browser action ${request.decision.action} is not allowed by capability manifest ${request.authority.capability_manifest_id}`
+		)
 	}
 }
 
