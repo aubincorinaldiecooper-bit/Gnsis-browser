@@ -294,15 +294,7 @@ export class BrowserActionBridge {
 	}
 
 	private assertSourceStillCurrent(request: BrowserDecisionRequest): void {
-		if (request.frame_id == null) return
-		if (!Number.isInteger(request.source_tab_id)) {
-			throw new Error('frame-bound browser action requires source_tab_id')
-		}
-		if (this.tabs.currentTabId !== request.source_tab_id) {
-			throw new Error(
-				`stale browser frame: frame came from tab ${request.source_tab_id}, current eligible tab is ${this.tabs.currentTabId}; reobserve before acting`
-			)
-		}
+		assertFrameSource(request.frame_id, request.source_tab_id, this.tabs.currentTabId)
 	}
 }
 
@@ -405,4 +397,21 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 			{ once: true }
 		)
 	})
+}
+
+
+export function assertFrameSource(
+	frameId: string | number | null | undefined,
+	sourceTabId: number | null | undefined,
+	currentTabId: number | null
+): void {
+	if (frameId == null) return
+	if (!Number.isInteger(sourceTabId)) {
+		throw new Error('frame-bound browser action requires source_tab_id')
+	}
+	if (currentTabId !== sourceTabId) {
+		throw new Error(
+			`stale browser frame: frame came from tab ${sourceTabId}, current eligible tab is ${currentTabId}; reobserve before acting`
+		)
+	}
 }
