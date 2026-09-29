@@ -3,6 +3,8 @@ import type { PointActionOptions } from '@page-agent/page-controller'
 import { RemotePageController } from '@/agent/RemotePageController'
 import { TabsController } from '@/agent/TabsController'
 
+import { frameSourceTab } from './FrameProvenance'
+
 export type BrowserDecisionAction =
 	| 'click'
 	| 'type'
@@ -294,7 +296,18 @@ export class BrowserActionBridge {
 	}
 
 	private assertSourceStillCurrent(request: BrowserDecisionRequest): void {
-		assertFrameSource(request.frame_id, request.source_tab_id, this.tabs.currentTabId)
+		const registered = frameSourceTab(request.frame_id)
+		const sourceTabId = registered ?? request.source_tab_id
+		if (
+			registered != null &&
+			request.source_tab_id != null &&
+			registered !== request.source_tab_id
+		) {
+			throw new Error(
+				`frame provenance mismatch: registry says tab ${registered}, request says ${request.source_tab_id}`
+			)
+		}
+		assertFrameSource(request.frame_id, sourceTabId, this.tabs.currentTabId)
 	}
 }
 
