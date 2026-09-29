@@ -54,6 +54,19 @@ export interface BrowserActionEvidence {
 	resolution_method?: string | null
 	resolved_target?: { x: number; y: number } | null
 	target_box?: { x: number; y: number; width: number; height: number } | null
+	/**
+	 * The page's layout viewport (CSS pixels) when the point was mapped.
+	 * `resolved_target` and `target_box` are in these pixels; `raw_target` and
+	 * `source_viewport` are in the source frame's pixels. The two sizes relate
+	 * them.
+	 */
+	page_viewport?: {
+		width: number
+		height: number
+		device_pixel_ratio: number
+		scroll_x: number
+		scroll_y: number
+	} | null
 }
 
 export interface BrowserDecisionResult {
@@ -74,6 +87,13 @@ interface PageActionResult {
 		method: string
 		resolvedPoint?: { x: number; y: number }
 		targetBox?: { x: number; y: number; width: number; height: number }
+		viewport?: {
+			width: number
+			height: number
+			devicePixelRatio: number
+			scrollX: number
+			scrollY: number
+		}
 	}
 }
 
@@ -164,6 +184,14 @@ export class BrowserActionBridge {
 		this.tabs.dispose()
 	}
 
+	/** The tab actions would run on now: the one to capture for GNSIS. */
+	async eligibleTabId(): Promise<number> {
+		await this.tabs.attachToActiveTab({ includeAllTabs: true })
+		const tabId = this.tabs.currentTabId
+		if (tabId == null) throw new Error('no eligible browser tab to capture')
+		return tabId
+	}
+
 	private async executeOnce(
 		request: BrowserDecisionRequest,
 		signal: AbortSignal
@@ -218,16 +246,12 @@ export class BrowserActionBridge {
 				message = requirePageSuccess(pageResult)
 				break
 			case 'navigate':
-				message = await this.tabs.navigateCurrent(
-					requireHttpUrl(decision.url, 'navigate'),
-					{ signal }
-				)
+				message = await this.tabs.navigateCurrent(requireHttpUrl(decision.url, 'navigate'), {
+					signal,
+				})
 				break
 			case 'open_url':
-				message = await this.tabs.openNewTab(
-					requireHttpUrl(decision.url, 'open_url'),
-					{ signal }
-				)
+				message = await this.tabs.openNewTab(requireHttpUrl(decision.url, 'open_url'), { signal })
 				break
 			case 'back':
 				message = await this.tabs.goBack({ signal })
@@ -271,6 +295,7 @@ export class BrowserActionBridge {
 
 		signal.throwIfAborted()
 		const completedAt = Date.now()
+		const pageViewport = pageResult?.execution?.viewport
 		return {
 			call_id: request.call_id,
 			frame_id: request.frame_id,
@@ -291,6 +316,15 @@ export class BrowserActionBridge {
 				resolution_method: pageResult?.execution?.method ?? null,
 				resolved_target: pageResult?.execution?.resolvedPoint ?? null,
 				target_box: pageResult?.execution?.targetBox ?? null,
+				page_viewport: pageViewport
+					? {
+							width: pageViewport.width,
+							height: pageViewport.height,
+							device_pixel_ratio: pageViewport.devicePixelRatio,
+							scroll_x: pageViewport.scrollX,
+							scroll_y: pageViewport.scrollY,
+						}
+					: null,
 			},
 		}
 	}
@@ -328,9 +362,10 @@ export function parseBrowserDecisionRequest(value: unknown): BrowserDecisionRequ
 	return request
 }
 
-export function normalizedPoint(
-	decision: BrowserDecisionRequest['decision']
-): { x: number; y: number } {
+export function normalizedPoint(decision: BrowserDecisionRequest['decision']): {
+	x: number
+	y: number
+} {
 	const target = decision.target
 	const viewport = decision.viewport
 	if (!target) throw new Error(`${decision.action} requires a target`)
@@ -411,7 +446,6 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 		)
 	})
 }
-
 
 export function assertFrameSource(
 	frameId: string | number | null | undefined,

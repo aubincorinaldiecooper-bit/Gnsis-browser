@@ -17,10 +17,8 @@ function mount(html: string) {
 		boxes.set(element, [x, y, width, height])
 	}
 
-	vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
-		this: Element
-	) {
-		const [x, y, width, height] = boxes.get(this) ?? [0, 0, 0, 0]
+	const rectOf = (element: Element) => {
+		const [x, y, width, height] = boxes.get(element) ?? [0, 0, 0, 0]
 		return {
 			x,
 			y,
@@ -32,7 +30,20 @@ function mount(html: string) {
 			bottom: y + height,
 			toJSON: () => ({}),
 		}
+	}
+	vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+		this: Element
+	) {
+		return rectOf(this) as DOMRect
 	})
+	// Some happy-dom elements (e.g. <select>) define their own
+	// getBoundingClientRect, which shadows the prototype spy above.
+	for (const element of boxes.keys()) {
+		Object.defineProperty(element, 'getBoundingClientRect', {
+			configurable: true,
+			value: () => rectOf(element),
+		})
+	}
 
 	const hitsAt = (px: number, py: number): Element[] =>
 		[...boxes.entries()]

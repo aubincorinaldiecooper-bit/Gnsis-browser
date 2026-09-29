@@ -2,26 +2,37 @@
  * Hub WebSocket Protocol
  *
  * Hub connects as WS client to `ws://localhost:{port}`.
- * All messages are JSON. One task at a time.
+ * All messages are JSON. One task or browser action at a time.
  *
  * Inbound (Caller → Hub):
  *   { type: "execute", task: string, config?: object }
- *   { type: "stop" }
+ *   { type: "stop", call_id?: string }
+ *   { type: "browser.action", call_id, frame_id?, source_tab_id?, decision }   (GNSIS)
+ *   { type: "capture.start", fps?, max_edge?, quality? }                       (GNSIS)
+ *   { type: "capture.stop" }                                                  (GNSIS)
  *
  * Outbound (Hub → Caller):
- *   { type: "ready" }
+ *   { type: "ready", session_id: string }
  *   { type: "result", success: boolean, data: string }
- *   { type: "error", message: string }
+ *   { type: "error", message: string, call_id?: string }
+ *   { type: "browser.action.result", call_id, frame_id, success, done, message, evidence }
+ *   { type: "capture.started", capture_session_id, tab_id }
+ *   { type: "capture.frame", frame_id, captured_at_ms, encoding, image_base64, source }
+ *   { type: "capture.stopped", reason }
+ *
+ * GNSIS drives browser.action and capture: frames go into GNSIS's screen
+ * history; actions come back as one structured decision each.
  */
 import type { ExecutionResult } from '@page-agent/core'
 import { useEffect, useRef, useState } from 'react'
 
 import type { ExtConfig } from '@/agent/useAgent'
 import {
-	parseBrowserDecisionRequest,
 	type BrowserDecisionRequest,
 	type BrowserDecisionResult,
+	parseBrowserDecisionRequest,
 } from '@/vision/BrowserActionBridge'
+import type { CaptureStartOptions, CapturedBrowserFrame } from '@/vision/BrowserFrameStream'
 
 // --- Protocol types ---
 
@@ -40,7 +51,16 @@ interface BrowserActionMessage extends BrowserDecisionRequest {
 	type: 'browser.action'
 }
 
-type InboundMessage = ExecuteMessage | StopMessage | BrowserActionMessage
+interface CaptureStartMessage extends CaptureStartOptions {
+	type: 'capture.start'
+}
+
+interface CaptureStopMessage {
+	type: 'capture.stop'
+}
+
+type InboundMessage =
+	ExecuteMessage | StopMessage | BrowserActionMessage | CaptureStartMessage | CaptureStopMessage
 
 interface ReadyMessage {
 	type: 'ready'
@@ -63,7 +83,29 @@ interface BrowserActionResultMessage extends BrowserDecisionResult {
 	type: 'browser.action.result'
 }
 
-type OutboundMessage = ReadyMessage | ResultMessage | ErrorMessage | BrowserActionResultMessage
+interface CaptureStartedMessage {
+	type: 'capture.started'
+	capture_session_id: string
+	tab_id: number
+}
+
+interface CaptureFrameMessage extends CapturedBrowserFrame {
+	type: 'capture.frame'
+}
+
+interface CaptureStoppedMessage {
+	type: 'capture.stopped'
+	reason: string
+}
+
+type OutboundMessage =
+	| ReadyMessage
+	| ResultMessage
+	| ErrorMessage
+	| BrowserActionResultMessage
+	| CaptureStartedMessage
+	| CaptureFrameMessage
+	| CaptureStoppedMessage
 
 export type HubWsState = 'connecting' | 'connected' | 'disconnected'
 
@@ -78,6 +120,11 @@ export interface HubWsHandlers {
 	onBrowserCancel: (callId?: string) => void
 	onSessionReset: (sessionId: string) => void
 	onStop: () => void
+	onCaptureStart: (
+		options: CaptureStartOptions,
+		emit: (frame: CapturedBrowserFrame) => void
+	) => Promise<{ captureSessionId: string; tabId: number }>
+	onCaptureStop: () => Promise<void>
 }
 
 /**
@@ -126,6 +173,7 @@ export class HubWs {
 			this.#ws = null
 			this.#busy = false
 			this.#approved = false
+			void this.#handlers.onCaptureStop()
 			this.#setState('disconnected')
 		})
 
@@ -178,6 +226,27 @@ export class HubWs {
 				this.#handlers.onBrowserCancel(msg.call_id)
 				this.#handlers.onStop()
 				break
+			case 'capture.start':
+				void this.#handleCaptureStart(msg)
+				break
+			case 'capture.stop':
+				await this.#handlers.onCaptureStop()
+				this.#send({ type: 'capture.stopped', reason: 'requested' })
+				break
+		}
+	}
+
+	async #handleCaptureStart(msg: CaptureStartMessage) {
+		try {
+			const { captureSessionId, tabId } = await this.#handlers.onCaptureStart(msg, (frame) =>
+				this.#send({ type: 'capture.frame', ...frame })
+			)
+			this.#send({ type: 'capture.started', capture_session_id: captureSessionId, tab_id: tabId })
+		} catch (err) {
+			this.#send({
+				type: 'capture.stopped',
+				reason: err instanceof Error ? err.message : String(err),
+			})
 		}
 	}
 
@@ -196,7 +265,6 @@ export class HubWs {
 		if (ok) this.#approved = true
 		return ok
 	}
-
 
 	async #handleBrowserAction(msg: BrowserActionMessage) {
 		if (this.#busy) {
@@ -256,7 +324,9 @@ export function useHubWs(
 	config: ExtConfig | null,
 	executeBrowserAction: (request: BrowserDecisionRequest) => Promise<BrowserDecisionResult>,
 	cancelBrowserAction: (callId?: string) => void,
-	resetBrowserSession: (sessionId: string) => void
+	resetBrowserSession: (sessionId: string) => void,
+	startCapture: HubWsHandlers['onCaptureStart'],
+	stopCapture: HubWsHandlers['onCaptureStop']
 ): { wsState: HubWsState } {
 	const wsPort = new URLSearchParams(location.search).get('ws')
 	const [wsState, setWsState] = useState<HubWsState>(() => (wsPort ? 'connecting' : 'disconnected'))
@@ -270,6 +340,8 @@ export function useHubWs(
 		executeBrowserAction,
 		cancelBrowserAction,
 		resetBrowserSession,
+		startCapture,
+		stopCapture,
 	})
 	useEffect(() => {
 		latestRef.current = {
@@ -280,6 +352,8 @@ export function useHubWs(
 			executeBrowserAction,
 			cancelBrowserAction,
 			resetBrowserSession,
+			startCapture,
+			stopCapture,
 		}
 	})
 
@@ -301,6 +375,8 @@ export function useHubWs(
 				onBrowserCancel: (callId) => latestRef.current.cancelBrowserAction(callId),
 				onSessionReset: (sessionId) => latestRef.current.resetBrowserSession(sessionId),
 				onStop: () => latestRef.current.stop(),
+				onCaptureStart: (options, emit) => latestRef.current.startCapture(options, emit),
+				onCaptureStop: () => latestRef.current.stopCapture(),
 			},
 			setWsState
 		)

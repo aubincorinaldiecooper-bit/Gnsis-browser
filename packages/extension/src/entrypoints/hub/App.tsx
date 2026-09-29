@@ -2,11 +2,12 @@ import { FoldVertical, Plug, PlugZap, Square, UnfoldVertical, Unplug } from 'luc
 import { useEffect, useRef, useState } from 'react'
 
 import { useAgent } from '@/agent/useAgent'
-import { BrowserActionBridge } from '@/vision/BrowserActionBridge'
 import { ActivityCard, EventCard } from '@/components/cards'
 import { Logo, MotionOverlay, StatusDot } from '@/components/misc'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
+import { BrowserActionBridge } from '@/vision/BrowserActionBridge'
+import { BrowserFrameStream } from '@/vision/BrowserFrameStream'
 
 import { useHubWs } from './hub-ws'
 
@@ -16,6 +17,11 @@ export default function App() {
 	const getBrowserBridge = () => {
 		if (!browserBridgeRef.current) browserBridgeRef.current = new BrowserActionBridge()
 		return browserBridgeRef.current
+	}
+	const frameStreamRef = useRef<BrowserFrameStream | null>(null)
+	const getFrameStream = () => {
+		if (!frameStreamRef.current) frameStreamRef.current = new BrowserFrameStream()
+		return frameStreamRef.current
 	}
 	const { wsState } = useHubWs(
 		execute,
@@ -28,7 +34,16 @@ export default function App() {
 			if (callId) bridge.cancel(callId)
 			else bridge.cancelAll()
 		},
-		(sessionId) => getBrowserBridge().resetSession(sessionId)
+		(sessionId) => {
+			getBrowserBridge().resetSession(sessionId)
+			void getFrameStream().stop()
+		},
+		async (options, emit) => {
+			const tabId = await getBrowserBridge().eligibleTabId()
+			const captureSessionId = await getFrameStream().start(tabId, options, emit)
+			return { captureSessionId, tabId }
+		},
+		() => getFrameStream().stop()
 	)
 
 	useEffect(() => {
@@ -36,6 +51,11 @@ export default function App() {
 		return () => {
 			bridge?.dispose()
 			if (browserBridgeRef.current === bridge) browserBridgeRef.current = null
+			// Read at cleanup, not at mount: the stream only exists once GNSIS has
+			// asked for capture, and a live tab capture must not outlive the page.
+			const frames = frameStreamRef.current
+			frameStreamRef.current = null
+			void frames?.stop()
 		}
 	}, [])
 
