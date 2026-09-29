@@ -6,11 +6,21 @@ import {
 	pointActionOptions,
 } from './BrowserActionBridge'
 
+const authority = {
+	turn_id: 'turn-1',
+	provenance: 'direct_user' as const,
+	policy_decision: 'allow' as const,
+	policy_reason: 'asked for directly',
+	capability_manifest_id: 'browser-v1',
+	confirmation: 'not_required' as const,
+}
+
 describe('browser action runtime contract', () => {
 	it('rejects unsupported runtime actions instead of reporting success', () => {
 		expect(() =>
 			parseBrowserDecisionRequest({
 				call_id: 'c-1',
+				authority,
 				decision: { action: 'clik' },
 			})
 		).toThrow('unsupported browser action')
@@ -20,9 +30,29 @@ describe('browser action runtime contract', () => {
 		expect(() =>
 			parseBrowserDecisionRequest({
 				call_id: '',
+				authority,
 				decision: { action: 'wait' },
 			})
 		).toThrow('call_id')
+	})
+
+	it('fails closed without trusted execution authority', () => {
+		expect(() =>
+			parseBrowserDecisionRequest({
+				call_id: 'c-2',
+				decision: { action: 'wait' },
+			})
+		).toThrow('trusted user-intent authority')
+	})
+
+	it('requires approval when policy says confirm', () => {
+		expect(() =>
+			parseBrowserDecisionRequest({
+				call_id: 'c-3',
+				authority: { ...authority, policy_decision: 'confirm', confirmation: 'missing' },
+				decision: { action: 'wait' },
+			})
+		).toThrow('approved confirmation')
 	})
 
 	it('keeps target resolution off unless explicitly requested', () => {
