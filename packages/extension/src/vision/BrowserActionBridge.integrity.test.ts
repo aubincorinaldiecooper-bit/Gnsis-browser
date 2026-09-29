@@ -56,6 +56,16 @@ describe('browser action runtime contract', () => {
 		).toThrow('approved confirmation')
 	})
 
+	it('rejects actions outside the capability manifest', () => {
+		expect(() =>
+			parseBrowserDecisionRequest({
+				call_id: 'c-4',
+				authority: { ...authority, allowed_actions: ['wait'] },
+				decision: { action: 'click' },
+			})
+		).toThrow('not allowed by capability manifest')
+	})
+
 	it('keeps target resolution off unless explicitly requested', () => {
 		expect(pointActionOptions({ action: 'click' })).toEqual({ resolveTarget: false })
 	})
