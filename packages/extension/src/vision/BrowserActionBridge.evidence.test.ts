@@ -25,6 +25,14 @@ const request = {
 	call_id: 'call_1',
 	frame_id: null,
 	source_tab_id: 17,
+	authority: {
+		turn_id: 'turn-1',
+		provenance: 'direct_user' as const,
+		policy_decision: 'allow' as const,
+		policy_reason: 'asked for directly',
+		capability_manifest_id: 'browser-v1',
+		confirmation: 'not_required' as const,
+	},
 	decision: {
 		action: 'click' as const,
 		target: { x: 320, y: 100 },
