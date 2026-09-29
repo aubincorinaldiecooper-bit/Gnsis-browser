@@ -187,12 +187,22 @@ export class RemotePageController {
 			}
 		}
 
-		return sendMessage({
+		const response = await sendMessage({
 			type: 'PAGE_CONTROL',
 			action: action,
 			targetTabId: this.currentTabId!,
 			payload,
 		})
+		if (!response) {
+			return { success: false, message: 'Page control request returned no response.' }
+		}
+		if (response.success === false && !response.message) {
+			return {
+				...response,
+				message: response.error || 'Page control request failed.',
+			}
+		}
+		return response
 	}
 }
 
