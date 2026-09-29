@@ -31,6 +31,7 @@ const request = {
 		policy_decision: 'allow' as const,
 		policy_reason: 'asked for directly',
 		capability_manifest_id: 'browser-v1',
+		allowed_actions: ['click', 'wait'] as const,
 		confirmation: 'not_required' as const,
 	},
 	decision: {
