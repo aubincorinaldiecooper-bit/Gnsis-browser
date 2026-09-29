@@ -26,7 +26,7 @@ export interface BrowserActionAuthority {
 	policy_decision: 'allow' | 'confirm' | 'deny'
 	policy_reason: string
 	capability_manifest_id: string
-	allowed_actions: BrowserDecisionAction[]
+	allowed_actions: readonly BrowserDecisionAction[]
 	confirmation: 'not_required' | 'approved' | 'denied' | 'missing'
 }
 
