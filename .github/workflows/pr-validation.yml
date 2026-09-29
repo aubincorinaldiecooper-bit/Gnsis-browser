@@ -1,0 +1,28 @@
+name: PR validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+
+jobs:
+  browser-extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Extension tests
+        run: npm test -w @page-agent/ext
+      - name: Page controller tests
+        run: npm test -w @page-agent/page-controller
+      - name: Build extension
+        run: npm run build:ext
