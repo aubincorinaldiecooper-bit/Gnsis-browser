@@ -52,7 +52,13 @@ describe('browser action evidence', () => {
 			source_viewport: { width: 640, height: 400 },
 			resolution_method: 'raw-point',
 			target_box: { x: 600, y: 180, width: 120, height: 40 },
-			page_viewport: { width: 1280, height: 800, device_pixel_ratio: 2, scroll_x: 0, scroll_y: 360 },
+			page_viewport: {
+				width: 1280,
+				height: 800,
+				device_pixel_ratio: 2,
+				scroll_x: 0,
+				scroll_y: 360,
+			},
 		})
 	})
 
