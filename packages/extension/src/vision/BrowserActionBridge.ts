@@ -467,6 +467,17 @@ function validateAuthority(authority: BrowserActionAuthority | null | undefined)
 	if (authority.policy_decision === 'confirm' && authority.confirmation !== 'approved') {
 		throw new Error('browser action requires an approved confirmation')
 	}
+	// A generic allow is not enough when the intent cannot be traced to the
+	// person: unknown provenance fails closed, and an action induced by what a
+	// page showed needs the person's explicit approval.
+	if (
+		(authority.provenance === 'unknown' || authority.provenance === 'observed_untrusted') &&
+		authority.confirmation !== 'approved'
+	) {
+		throw new Error(
+			`browser action with ${authority.provenance} provenance requires an approved confirmation`
+		)
+	}
 	if (
 		authority.policy_decision === 'allow' &&
 		!['not_required', 'approved'].includes(authority.confirmation)

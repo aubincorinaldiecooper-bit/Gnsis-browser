@@ -56,6 +56,25 @@ describe('browser action runtime contract', () => {
 		).toThrow('approved confirmation')
 	})
 
+	it('does not run on a generic allow when the intent cannot be traced to the person', () => {
+		for (const provenance of ['unknown', 'observed_untrusted'] as const) {
+			expect(() =>
+				parseBrowserDecisionRequest({
+					call_id: `c-${provenance}`,
+					authority: { ...authority, provenance },
+					decision: { action: 'wait' },
+				})
+			).toThrow(`${provenance} provenance requires an approved confirmation`)
+			expect(() =>
+				parseBrowserDecisionRequest({
+					call_id: `c-${provenance}-approved`,
+					authority: { ...authority, provenance, confirmation: 'approved' },
+					decision: { action: 'wait' },
+				})
+			).not.toThrow()
+		}
+	})
+
 	it('rejects actions outside the capability manifest', () => {
 		expect(() =>
 			parseBrowserDecisionRequest({
