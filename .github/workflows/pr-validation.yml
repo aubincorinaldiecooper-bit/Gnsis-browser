@@ -26,10 +26,13 @@ jobs:
         run: npm test -w @page-agent/page-controller
       - name: Build extension
         run: npm run build:ext
+      - name: Stage extension zip
+        run: |
+          mkdir -p artifacts
+          cp .output/*.zip artifacts/
       - name: Upload extension zip
         uses: actions/upload-artifact@v4
         with:
           name: gnsis-browser-extension
-          path: .output/*.zip
+          path: artifacts/*.zip
           if-no-files-found: error
-          include-hidden-files: true
