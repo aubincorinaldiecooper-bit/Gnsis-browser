@@ -1,30 +1,57 @@
+import type { PointActionOptions } from '@page-agent/page-controller'
+
 import { RemotePageController } from '@/agent/RemotePageController'
 import { TabsController } from '@/agent/TabsController'
 
 export type BrowserDecisionAction =
 	| 'click'
 	| 'type'
+	| 'select'
 	| 'scroll'
 	| 'navigate'
+	| 'open_url'
 	| 'back'
+	| 'reload'
 	| 'wait'
 	| 'done'
 	| 'recover'
+	| 'switch_tab'
+	| 'close_tab'
 
 export interface BrowserDecisionRequest {
 	call_id: string
 	frame_id?: string | number | null
+	source_tab_id?: number | null
 	decision: {
 		action: BrowserDecisionAction
 		confidence?: number
 		target?: { x: number; y: number } | null
 		text?: string | null
+		option?: string | null
 		url?: string | null
-		direction?: 'up' | 'down' | null
+		direction?: 'up' | 'down' | 'left' | 'right' | null
 		viewport?: { width: number; height: number } | null
+		tab_id?: number | null
+		wait_ms?: number | null
 		resolve_target?: boolean
 		max_radius_px?: number | null
 	}
+}
+
+export interface BrowserActionEvidence {
+	context: 'browser'
+	action: BrowserDecisionAction
+	source_tab_id: number | null
+	executed_tab_id: number | null
+	started_at_ms: number
+	completed_at_ms: number
+	latency_ms: number
+	source_viewport?: { width: number; height: number } | null
+	raw_target?: { x: number; y: number } | null
+	resolve_target: boolean
+	resolution_method?: string | null
+	resolved_target?: { x: number; y: number } | null
+	target_box?: { x: number; y: number; width: number; height: number } | null
 }
 
 export interface BrowserDecisionResult {
@@ -33,131 +60,267 @@ export interface BrowserDecisionResult {
 	success: boolean
 	done: boolean
 	message: string
+	evidence: BrowserActionEvidence
+	replayed?: boolean
 }
+
+interface PageActionResult {
+	success: boolean
+	message: string
+	error?: string
+	execution?: {
+		method: string
+		resolvedPoint?: { x: number; y: number }
+		targetBox?: { x: number; y: number; width: number; height: number }
+	}
+}
+
+const ACTIONS = new Set<BrowserDecisionAction>([
+	'click',
+	'type',
+	'select',
+	'scroll',
+	'navigate',
+	'open_url',
+	'back',
+	'reload',
+	'wait',
+	'done',
+	'recover',
+	'switch_tab',
+	'close_tab',
+])
+
+const COMPLETED_CACHE_LIMIT = 256
 
 /**
  * Execution-only browser bridge.
  *
- * GNSIS has already observed the screen and selected one structured action.
- * This class never performs perception, planning or DOM enumeration. DOM is
- * used only after the pixel target already exists, for bounded r24 cleanup.
+ * GNSIS has already observed the rendered screen and selected one structured
+ * action. DOM is never used for perception. PageController may use local DOM
+ * geometry only after the pixel target exists, for optional bounded actuator
+ * cleanup and executor-side evidence.
  */
 export class BrowserActionBridge {
 	private readonly tabs = new TabsController()
 	private readonly page = new RemotePageController(this.tabs)
 	private readonly completed = new Map<string, BrowserDecisionResult>()
-	private readonly inFlight = new Map<string, Promise<BrowserDecisionResult>>()
+	private readonly inFlight = new Map<
+		string,
+		{ promise: Promise<BrowserDecisionResult>; abort: AbortController }
+	>()
+	private sessionNonce = ''
+
+	resetSession(sessionNonce: string): void {
+		if (sessionNonce === this.sessionNonce) return
+		this.cancelAll()
+		this.completed.clear()
+		this.sessionNonce = sessionNonce
+	}
 
 	async execute(request: BrowserDecisionRequest): Promise<BrowserDecisionResult> {
-		if (!request.call_id) throw new Error('browser action requires call_id')
+		validateRequest(request)
+
 		const completed = this.completed.get(request.call_id)
-		if (completed) return { ...completed }
+		if (completed) return { ...completed, replayed: true }
+
 		const active = this.inFlight.get(request.call_id)
-		if (active) return active
-		const execution = this.executeOnce(request)
-		this.inFlight.set(request.call_id, execution)
-		try {
-			const result = await execution
-			this.completed.set(request.call_id, result)
-			if (this.completed.size > 256) {
-				const oldest = this.completed.keys().next().value
-				if (oldest !== undefined) this.completed.delete(oldest)
-			}
-			return result
-		} finally {
-			this.inFlight.delete(request.call_id)
+		if (active) return active.promise
+
+		const abort = new AbortController()
+		const promise = this.executeOnce(request, abort.signal)
+			.then((result) => {
+				this.completed.set(request.call_id, result)
+				while (this.completed.size > COMPLETED_CACHE_LIMIT) {
+					const oldest = this.completed.keys().next().value
+					if (oldest === undefined) break
+					this.completed.delete(oldest)
+				}
+				return result
+			})
+			.finally(() => this.inFlight.delete(request.call_id))
+
+		this.inFlight.set(request.call_id, { promise, abort })
+		return promise
+	}
+
+	cancel(callId: string): boolean {
+		const active = this.inFlight.get(callId)
+		if (!active) return false
+		active.abort.abort(new DOMException('Browser action cancelled', 'AbortError'))
+		return true
+	}
+
+	cancelAll(): void {
+		for (const active of this.inFlight.values()) {
+			active.abort.abort(new DOMException('Browser actions cancelled', 'AbortError'))
 		}
 	}
 
-	private async executeOnce(request: BrowserDecisionRequest): Promise<BrowserDecisionResult> {
-		await this.ensureAttached()
+	dispose(): void {
+		this.cancelAll()
+		this.tabs.dispose()
+	}
 
+	private async executeOnce(
+		request: BrowserDecisionRequest,
+		signal: AbortSignal
+	): Promise<BrowserDecisionResult> {
+		signal.throwIfAborted()
+		const startedAt = Date.now()
 		const decision = request.decision
 		let done = false
 		let message = ''
+		let pageResult: PageActionResult | null = null
+
+		if (decision.action !== 'done' && decision.action !== 'wait') {
+			await this.tabs.attachToActiveTab({ includeAllTabs: true })
+			this.assertSourceStillCurrent(request)
+		}
 
 		switch (decision.action) {
-			case 'click': {
-				const point = normalizedPoint(decision)
-				const result = await this.page.clickPoint(point, pointActionOptions(decision))
-				message = result.message
-				if (!result.success) throw new Error(result.message)
+			case 'click':
+				pageResult = await this.page.clickPoint(
+					normalizedPoint(decision),
+					pointActionOptions(decision)
+				)
+				message = requirePageSuccess(pageResult)
+				break
+			case 'type':
+				if (decision.text == null) throw new Error('type requires text')
+				pageResult = await this.page.inputTextAtPoint(
+					normalizedPoint(decision),
+					decision.text,
+					pointActionOptions(decision)
+				)
+				message = requirePageSuccess(pageResult)
+				break
+			case 'select': {
+				const option = decision.option ?? decision.text
+				if (option == null) throw new Error('select requires option')
+				pageResult = await this.page.selectOptionAtPoint(
+					normalizedPoint(decision),
+					option,
+					pointActionOptions(decision)
+				)
+				message = requirePageSuccess(pageResult)
 				break
 			}
-			case 'type': {
-				if (!decision.text) throw new Error('type requires text')
-				const point = normalizedPoint(decision)
-				const result = await this.page.inputTextAtPoint(point, decision.text, pointActionOptions(decision))
-				message = result.message
-				if (!result.success) throw new Error(result.message)
-				break
-			}
-			case 'scroll': {
-				if (decision.direction !== 'up' && decision.direction !== 'down') {
-					throw new Error('scroll requires direction up|down')
-				}
-				const result = await this.page.scrollViewport({
+			case 'scroll':
+				if (!decision.direction) throw new Error('scroll requires direction')
+				pageResult = await this.page.scrollViewport({
 					direction: decision.direction,
 					amount: 'page',
 					fraction: 0.7,
 				})
-				message = result.message
-				if (!result.success) throw new Error(result.message)
+				message = requirePageSuccess(pageResult)
 				break
-			}
-			case 'navigate': {
-				if (!decision.url?.startsWith('http://') && !decision.url?.startsWith('https://')) {
-					throw new Error('navigate requires an http(s) url')
-				}
-				message = await this.tabs.navigateCurrent(decision.url)
+			case 'navigate':
+				message = await this.tabs.navigateCurrent(
+					requireHttpUrl(decision.url, 'navigate'),
+					{ signal }
+				)
 				break
-			}
+			case 'open_url':
+				message = await this.tabs.openNewTab(
+					requireHttpUrl(decision.url, 'open_url'),
+					{ signal }
+				)
+				break
 			case 'back':
-				message = await this.tabs.goBack()
+				message = await this.tabs.goBack({ signal })
 				break
-			case 'wait':
-				await new Promise((resolve) => setTimeout(resolve, 600))
-				message = 'Waited for more visual evidence.'
+			case 'reload':
+				message = await this.tabs.reloadCurrent({ signal })
 				break
+			case 'switch_tab':
+				if (!Number.isInteger(decision.tab_id)) throw new Error('switch_tab requires tab_id')
+				message = await this.tabs.switchToTab(decision.tab_id!)
+				break
+			case 'close_tab':
+				if (!Number.isInteger(decision.tab_id)) throw new Error('close_tab requires tab_id')
+				message = await this.tabs.closeTab(decision.tab_id!)
+				break
+			case 'wait': {
+				const waitMs = Math.min(10_000, Math.max(0, decision.wait_ms ?? 600))
+				await abortableDelay(waitMs, signal)
+				message = `Waited ${waitMs}ms for more visual evidence.`
+				break
+			}
 			case 'done':
 				done = true
 				message = 'Task is complete.'
 				break
-			case 'recover': {
-				await this.page.pressEscape()
-				if (decision.target) {
-					const point = normalizedPoint(decision)
-					const result = await this.page.clickPoint(point, {
-						resolveTarget: true,
-						maxRadiusPx: 24,
-					})
-					message = `Recovery: ${result.message}`
-					if (!result.success) throw new Error(result.message)
-				} else {
-					message = await this.tabs.reloadCurrent()
+			case 'recover':
+				if (!decision.target) {
+					throw new Error(
+						'recover without a visual target requires trusted key input; route Escape to the desktop actuator'
+					)
 				}
+				pageResult = await this.page.clickPoint(
+					normalizedPoint(decision),
+					pointActionOptions(decision)
+				)
+				message = `Recovery: ${requirePageSuccess(pageResult)}`
 				break
-			}
+			default:
+				throw new Error(`unsupported browser action: ${String(decision.action)}`)
 		}
 
+		signal.throwIfAborted()
+		const completedAt = Date.now()
 		return {
 			call_id: request.call_id,
 			frame_id: request.frame_id,
 			success: true,
 			done,
 			message,
+			evidence: {
+				context: 'browser',
+				action: decision.action,
+				source_tab_id: request.source_tab_id ?? null,
+				executed_tab_id: this.tabs.currentTabId,
+				started_at_ms: startedAt,
+				completed_at_ms: completedAt,
+				latency_ms: completedAt - startedAt,
+				source_viewport: decision.viewport,
+				raw_target: decision.target,
+				resolve_target: Boolean(decision.resolve_target),
+				resolution_method: pageResult?.execution?.method ?? null,
+				resolved_target: pageResult?.execution?.resolvedPoint ?? null,
+				target_box: pageResult?.execution?.targetBox ?? null,
+			},
 		}
 	}
 
-	dispose(): void {
-		this.tabs.dispose()
+	private assertSourceStillCurrent(request: BrowserDecisionRequest): void {
+		if (request.frame_id == null) return
+		if (!Number.isInteger(request.source_tab_id)) {
+			throw new Error('frame-bound browser action requires source_tab_id')
+		}
+		if (this.tabs.currentTabId !== request.source_tab_id) {
+			throw new Error(
+				`stale browser frame: frame came from tab ${request.source_tab_id}, current eligible tab is ${this.tabs.currentTabId}; reobserve before acting`
+			)
+		}
+	}
+}
+
+export function parseBrowserDecisionRequest(value: unknown): BrowserDecisionRequest {
+	if (!isRecord(value)) throw new Error('browser.action must be an object')
+	const decision = value.decision
+	if (!isRecord(decision)) throw new Error('browser.action decision must be an object')
+	const action = decision.action
+	if (typeof action !== 'string' || !ACTIONS.has(action as BrowserDecisionAction)) {
+		throw new Error(`unsupported browser action: ${String(action)}`)
+	}
+	if (typeof value.call_id !== 'string' || !value.call_id.trim()) {
+		throw new Error('browser.action requires non-empty call_id')
 	}
 
-	private async ensureAttached(): Promise<void> {
-		// Re-resolve the active tab for every action. The person may have changed
-		// tabs between the frame GNSIS saw and the action arriving.
-		await this.tabs.attachToActiveTab({ includeAllTabs: true })
-	}
+	const request = value as unknown as BrowserDecisionRequest
+	validateRequest(request)
+	return request
 }
 
 export function normalizedPoint(
@@ -170,6 +333,8 @@ export function normalizedPoint(
 		throw new Error(`${decision.action} requires the source viewport`)
 	}
 	if (
+		!Number.isFinite(target.x) ||
+		!Number.isFinite(target.y) ||
 		target.x < 0 ||
 		target.y < 0 ||
 		target.x >= viewport.width ||
@@ -183,13 +348,61 @@ export function normalizedPoint(
 	}
 }
 
-
 export function pointActionOptions(
 	decision: BrowserDecisionRequest['decision']
-): { resolveTarget: boolean; maxRadiusPx?: number } {
+): PointActionOptions {
 	if (!decision.resolve_target) return { resolveTarget: false }
 	return {
 		resolveTarget: true,
 		maxRadiusPx: Math.min(24, Math.max(0, decision.max_radius_px ?? 24)),
 	}
+}
+
+function validateRequest(request: BrowserDecisionRequest): void {
+	if (!request.call_id?.trim()) throw new Error('browser action requires call_id')
+	if (!ACTIONS.has(request.decision.action)) {
+		throw new Error(`unsupported browser action: ${String(request.decision.action)}`)
+	}
+	if (
+		request.source_tab_id != null &&
+		(!Number.isInteger(request.source_tab_id) || request.source_tab_id <= 0)
+	) {
+		throw new Error('source_tab_id must be a positive integer')
+	}
+}
+
+function requirePageSuccess(result: PageActionResult): string {
+	if (!result?.success) {
+		throw new Error(result?.message || result?.error || 'browser page action failed')
+	}
+	return result.message
+}
+
+function requireHttpUrl(value: string | null | undefined, action: string): string {
+	if (!value?.startsWith('http://') && !value?.startsWith('https://')) {
+		throw new Error(`${action} requires an http(s) url`)
+	}
+	return value
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) {
+			reject(signal.reason)
+			return
+		}
+		const timer = setTimeout(resolve, ms)
+		signal.addEventListener(
+			'abort',
+			() => {
+				clearTimeout(timer)
+				reject(signal.reason)
+			},
+			{ once: true }
+		)
+	})
 }
