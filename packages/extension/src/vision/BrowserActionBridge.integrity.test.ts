@@ -6,11 +6,22 @@ import {
 	pointActionOptions,
 } from './BrowserActionBridge'
 
+const authority = {
+	turn_id: 'turn-1',
+	provenance: 'direct_user' as const,
+	policy_decision: 'allow' as const,
+	policy_reason: 'asked for directly',
+	capability_manifest_id: 'browser-v1',
+	allowed_actions: ['click', 'wait'] as const,
+	confirmation: 'not_required' as const,
+}
+
 describe('browser action runtime contract', () => {
 	it('rejects unsupported runtime actions instead of reporting success', () => {
 		expect(() =>
 			parseBrowserDecisionRequest({
 				call_id: 'c-1',
+				authority,
 				decision: { action: 'clik' },
 			})
 		).toThrow('unsupported browser action')
@@ -20,9 +31,58 @@ describe('browser action runtime contract', () => {
 		expect(() =>
 			parseBrowserDecisionRequest({
 				call_id: '',
+				authority,
 				decision: { action: 'wait' },
 			})
 		).toThrow('call_id')
+	})
+
+	it('fails closed without trusted execution authority', () => {
+		expect(() =>
+			parseBrowserDecisionRequest({
+				call_id: 'c-2',
+				decision: { action: 'wait' },
+			})
+		).toThrow('trusted user-intent authority')
+	})
+
+	it('requires approval when policy says confirm', () => {
+		expect(() =>
+			parseBrowserDecisionRequest({
+				call_id: 'c-3',
+				authority: { ...authority, policy_decision: 'confirm', confirmation: 'missing' },
+				decision: { action: 'wait' },
+			})
+		).toThrow('approved confirmation')
+	})
+
+	it('does not run on a generic allow when the intent cannot be traced to the person', () => {
+		for (const provenance of ['unknown', 'observed_untrusted'] as const) {
+			expect(() =>
+				parseBrowserDecisionRequest({
+					call_id: `c-${provenance}`,
+					authority: { ...authority, provenance },
+					decision: { action: 'wait' },
+				})
+			).toThrow(`${provenance} provenance requires an approved confirmation`)
+			expect(() =>
+				parseBrowserDecisionRequest({
+					call_id: `c-${provenance}-approved`,
+					authority: { ...authority, provenance, confirmation: 'approved' },
+					decision: { action: 'wait' },
+				})
+			).not.toThrow()
+		}
+	})
+
+	it('rejects actions outside the capability manifest', () => {
+		expect(() =>
+			parseBrowserDecisionRequest({
+				call_id: 'c-4',
+				authority: { ...authority, allowed_actions: ['wait'] },
+				decision: { action: 'click' },
+			})
+		).toThrow('not allowed by capability manifest')
 	})
 
 	it('keeps target resolution off unless explicitly requested', () => {

@@ -1,7 +1,7 @@
 import type { PointActionOptions } from '@page-agent/page-controller'
 
 import { RemotePageController } from '@/agent/RemotePageController'
-import { TabsController } from '@/agent/TabsController'
+import { TabsController, findEligibleTab } from '@/agent/TabsController'
 
 import { frameSourceTab } from './FrameProvenance'
 
@@ -20,10 +20,21 @@ export type BrowserDecisionAction =
 	| 'switch_tab'
 	| 'close_tab'
 
+export interface BrowserActionAuthority {
+	turn_id: string
+	provenance: 'direct_user' | 'mixed' | 'observed_untrusted' | 'delegated_result' | 'unknown'
+	policy_decision: 'allow' | 'confirm' | 'deny'
+	policy_reason: string
+	capability_manifest_id: string
+	allowed_actions: readonly BrowserDecisionAction[]
+	confirmation: 'not_required' | 'approved' | 'denied' | 'missing'
+}
+
 export interface BrowserDecisionRequest {
 	call_id: string
 	frame_id?: string | number | null
 	source_tab_id?: number | null
+	authority: BrowserActionAuthority
 	decision: {
 		action: BrowserDecisionAction
 		confidence?: number
@@ -54,6 +65,19 @@ export interface BrowserActionEvidence {
 	resolution_method?: string | null
 	resolved_target?: { x: number; y: number } | null
 	target_box?: { x: number; y: number; width: number; height: number } | null
+	/**
+	 * The page's layout viewport (CSS pixels) when the point was mapped.
+	 * `resolved_target` and `target_box` are in these pixels; `raw_target` and
+	 * `source_viewport` are in the source frame's pixels. The two sizes relate
+	 * them.
+	 */
+	page_viewport?: {
+		width: number
+		height: number
+		device_pixel_ratio: number
+		scroll_x: number
+		scroll_y: number
+	} | null
 }
 
 export interface BrowserDecisionResult {
@@ -74,6 +98,13 @@ interface PageActionResult {
 		method: string
 		resolvedPoint?: { x: number; y: number }
 		targetBox?: { x: number; y: number; width: number; height: number }
+		viewport?: {
+			width: number
+			height: number
+			devicePixelRatio: number
+			scrollX: number
+			scrollY: number
+		}
 	}
 }
 
@@ -164,6 +195,19 @@ export class BrowserActionBridge {
 		this.tabs.dispose()
 	}
 
+	/**
+	 * The tab actions would run on now: the one to capture for GNSIS.
+	 *
+	 * Capture can start while an action is running, so this only looks the tab
+	 * up. Re-attaching here would clear and re-point the actuator's current tab
+	 * under the action, which could then fail, or land on a tab its frame never
+	 * came from.
+	 */
+	async eligibleTabId(): Promise<number> {
+		const { chosen } = await findEligibleTab()
+		return chosen.id
+	}
+
 	private async executeOnce(
 		request: BrowserDecisionRequest,
 		signal: AbortSignal
@@ -218,16 +262,12 @@ export class BrowserActionBridge {
 				message = requirePageSuccess(pageResult)
 				break
 			case 'navigate':
-				message = await this.tabs.navigateCurrent(
-					requireHttpUrl(decision.url, 'navigate'),
-					{ signal }
-				)
+				message = await this.tabs.navigateCurrent(requireHttpUrl(decision.url, 'navigate'), {
+					signal,
+				})
 				break
 			case 'open_url':
-				message = await this.tabs.openNewTab(
-					requireHttpUrl(decision.url, 'open_url'),
-					{ signal }
-				)
+				message = await this.tabs.openNewTab(requireHttpUrl(decision.url, 'open_url'), { signal })
 				break
 			case 'back':
 				message = await this.tabs.goBack({ signal })
@@ -271,6 +311,7 @@ export class BrowserActionBridge {
 
 		signal.throwIfAborted()
 		const completedAt = Date.now()
+		const pageViewport = pageResult?.execution?.viewport
 		return {
 			call_id: request.call_id,
 			frame_id: request.frame_id,
@@ -291,6 +332,15 @@ export class BrowserActionBridge {
 				resolution_method: pageResult?.execution?.method ?? null,
 				resolved_target: pageResult?.execution?.resolvedPoint ?? null,
 				target_box: pageResult?.execution?.targetBox ?? null,
+				page_viewport: pageViewport
+					? {
+							width: pageViewport.width,
+							height: pageViewport.height,
+							device_pixel_ratio: pageViewport.devicePixelRatio,
+							scroll_x: pageViewport.scrollX,
+							scroll_y: pageViewport.scrollY,
+						}
+					: null,
 			},
 		}
 	}
@@ -328,9 +378,10 @@ export function parseBrowserDecisionRequest(value: unknown): BrowserDecisionRequ
 	return request
 }
 
-export function normalizedPoint(
-	decision: BrowserDecisionRequest['decision']
-): { x: number; y: number } {
+export function normalizedPoint(decision: BrowserDecisionRequest['decision']): {
+	x: number
+	y: number
+} {
 	const target = decision.target
 	const viewport = decision.viewport
 	if (!target) throw new Error(`${decision.action} requires a target`)
@@ -365,14 +416,81 @@ export function pointActionOptions(
 
 function validateRequest(request: BrowserDecisionRequest): void {
 	if (!request.call_id?.trim()) throw new Error('browser action requires call_id')
+	validateAuthority(request.authority)
 	if (!ACTIONS.has(request.decision.action)) {
 		throw new Error(`unsupported browser action: ${String(request.decision.action)}`)
 	}
+	assertAuthorizedAction(request)
 	if (
 		request.source_tab_id != null &&
 		(!Number.isInteger(request.source_tab_id) || request.source_tab_id <= 0)
 	) {
 		throw new Error('source_tab_id must be a positive integer')
+	}
+}
+
+function validateAuthority(authority: BrowserActionAuthority | null | undefined): void {
+	if (!authority || typeof authority !== 'object') {
+		throw new Error('browser action requires trusted user-intent authority')
+	}
+	for (const [name, value] of [
+		['turn_id', authority.turn_id],
+		['policy_reason', authority.policy_reason],
+		['capability_manifest_id', authority.capability_manifest_id],
+	] as const) {
+		if (typeof value !== 'string' || !value.trim()) {
+			throw new Error(`browser action authority requires ${name}`)
+		}
+	}
+	if (
+		!['direct_user', 'mixed', 'observed_untrusted', 'delegated_result', 'unknown'].includes(
+			authority.provenance
+		)
+	) {
+		throw new Error('browser action authority has invalid provenance')
+	}
+	if (!['allow', 'confirm', 'deny'].includes(authority.policy_decision)) {
+		throw new Error('browser action authority has invalid policy_decision')
+	}
+	if (!['not_required', 'approved', 'denied', 'missing'].includes(authority.confirmation)) {
+		throw new Error('browser action authority has invalid confirmation state')
+	}
+	if (!Array.isArray(authority.allowed_actions) || authority.allowed_actions.length === 0) {
+		throw new Error('browser action authority requires allowed_actions')
+	}
+	if (!authority.allowed_actions.every((action) => ACTIONS.has(action))) {
+		throw new Error('browser action authority has an invalid allowed action')
+	}
+	if (authority.policy_decision === 'deny') {
+		throw new Error(`browser action blocked by policy: ${authority.policy_reason}`)
+	}
+	if (authority.policy_decision === 'confirm' && authority.confirmation !== 'approved') {
+		throw new Error('browser action requires an approved confirmation')
+	}
+	// A generic allow is not enough when the intent cannot be traced to the
+	// person: unknown provenance fails closed, and an action induced by what a
+	// page showed needs the person's explicit approval.
+	if (
+		(authority.provenance === 'unknown' || authority.provenance === 'observed_untrusted') &&
+		authority.confirmation !== 'approved'
+	) {
+		throw new Error(
+			`browser action with ${authority.provenance} provenance requires an approved confirmation`
+		)
+	}
+	if (
+		authority.policy_decision === 'allow' &&
+		!['not_required', 'approved'].includes(authority.confirmation)
+	) {
+		throw new Error('browser action authority does not permit execution')
+	}
+}
+
+function assertAuthorizedAction(request: BrowserDecisionRequest): void {
+	if (!request.authority.allowed_actions.includes(request.decision.action)) {
+		throw new Error(
+			`browser action ${request.decision.action} is not allowed by capability manifest ${request.authority.capability_manifest_id}`
+		)
 	}
 }
 
@@ -411,7 +529,6 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 		)
 	})
 }
-
 
 export function assertFrameSource(
 	frameId: string | number | null | undefined,

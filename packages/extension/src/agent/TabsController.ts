@@ -30,6 +30,46 @@ async function getOwnWindowId(): Promise<number | undefined> {
 }
 
 /**
+ * The webpage tab browser actions would run on now: the active tab in this
+ * context's window if a content script can run there, otherwise the most
+ * recently used one that can.
+ *
+ * A lookup only. It changes no controller state and nothing in storage, so it
+ * is safe while an action is running on a tab it was validated against.
+ */
+export async function findEligibleTab(): Promise<{
+	windowId: number
+	windowTabs: chrome.tabs.Tab[]
+	chosen: chrome.tabs.Tab & { id: number }
+}> {
+	const activeTabResult = await sendMessage({
+		type: 'TAB_CONTROL',
+		action: 'get_active_tab',
+		payload: { windowId: await getOwnWindowId() },
+	})
+	const active = activeTabResult?.tab as chrome.tabs.Tab | undefined
+	if (!active || active.windowId == null) {
+		throw new Error(activeTabResult?.error || 'Failed to resolve browser window')
+	}
+
+	const result = await sendMessage({
+		type: 'TAB_CONTROL',
+		action: 'get_window_tabs',
+		payload: { windowId: active.windowId },
+	})
+	const windowTabs = ((result?.tabs as chrome.tabs.Tab[] | undefined) ?? []).filter(
+		(tab) => tab.id && !tab.pinned && isContentScriptAllowed(tab.url)
+	)
+	const eligibleActive = windowTabs.find((tab) => tab.active)
+	const fallback = [...windowTabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0]
+	const chosen = eligibleActive ?? fallback
+	if (!chosen?.id) {
+		throw new Error('No eligible webpage tab is available for browser execution')
+	}
+	return { windowId: active.windowId, windowTabs, chosen: { ...chosen, id: chosen.id } }
+}
+
+/**
  * Controller for managing browser tabs.
  * - live in the agent env (extension page or content script)
  * - no chrome apis. call sw for tab operations
@@ -149,34 +189,8 @@ export class TabsController {
 		this.manageTabGroup = false
 		this.task = ''
 
-		const activeTabResult = await sendMessage({
-			type: 'TAB_CONTROL',
-			action: 'get_active_tab',
-			payload: { windowId: await getOwnWindowId() },
-		})
-		const active = activeTabResult?.tab as chrome.tabs.Tab | undefined
-		if (!active || active.windowId == null) {
-			throw new Error(activeTabResult?.error || 'Failed to resolve browser window')
-		}
-		this.windowId = active.windowId
-
-		const result = await sendMessage({
-			type: 'TAB_CONTROL',
-			action: 'get_window_tabs',
-			payload: { windowId: this.windowId },
-		})
-		const windowTabs = ((result?.tabs as chrome.tabs.Tab[] | undefined) ?? []).filter(
-			(tab) => tab.id && !tab.pinned && isContentScriptAllowed(tab.url)
-		)
-		const eligibleActive = windowTabs.find((tab) => tab.active)
-		const fallback = [...windowTabs].sort(
-			(a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)
-		)[0]
-		const chosen = eligibleActive ?? fallback
-		if (!chosen?.id) {
-			throw new Error('No eligible webpage tab is available for browser execution')
-		}
-
+		const { windowId, windowTabs, chosen } = await findEligibleTab()
+		this.windowId = windowId
 		this.initialTabId = chosen.id
 		if (includeAllTabs) {
 			for (const tab of windowTabs) {
@@ -238,7 +252,6 @@ export class TabsController {
 
 		return `✅ Opened new tab ID ${tabId} with URL ${url}`
 	}
-
 
 	async navigateCurrent(url: string, options: { signal?: AbortSignal } = {}): Promise<string> {
 		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
@@ -400,7 +413,9 @@ export class TabsController {
 		return result
 	}
 
-	async snapshotTabs(): Promise<Array<{ id: number; current: boolean; title: string; url: string }>> {
+	async snapshotTabs(): Promise<
+		Array<{ id: number; current: boolean; title: string; url: string }>
+	> {
 		await this.syncTabs()
 		return Promise.all(
 			this.tabs.map(async (tab) => {

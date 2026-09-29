@@ -18,8 +18,8 @@ import * as dom from './dom'
 import type { FlatDomTree, InteractiveElementDomNode } from './dom/dom_tree/type'
 import { getPageInfo } from './dom/getPageInfo'
 import { patchReact } from './patches/react'
+import { type PointActionKind, type PointActionOptions, resolveActionTarget } from './resolveTarget'
 import { isAnchorElement } from './utils'
-import { resolveActionTarget, type PointActionKind, type PointActionOptions } from './resolveTarget'
 
 /**
  * Configuration for PageController
@@ -43,10 +43,25 @@ export interface BrowserState {
 	footer: string
 }
 
+/**
+ * The page's layout viewport when a visual point was mapped onto it.
+ *
+ * `resolvedPoint` and `targetBox` are in these CSS pixels. Reporting the size
+ * lets GNSIS relate them to the pixels of the frame the point came from.
+ */
+export interface PageViewportSnapshot {
+	width: number
+	height: number
+	devicePixelRatio: number
+	scrollX: number
+	scrollY: number
+}
+
 export interface ActionExecutionMetadata {
 	method: string
 	resolvedPoint?: { x: number; y: number }
 	targetBox?: { x: number; y: number; width: number; height: number }
+	viewport?: PageViewportSnapshot
 }
 
 interface ActionResult {
@@ -266,6 +281,16 @@ export class PageController extends EventTarget {
 		return { normalized, css }
 	}
 
+	private viewportSnapshot(): PageViewportSnapshot {
+		return {
+			width: window.innerWidth,
+			height: window.innerHeight,
+			devicePixelRatio: window.devicePixelRatio,
+			scrollX: window.scrollX,
+			scrollY: window.scrollY,
+		}
+	}
+
 	private getElementAtPoint(point: { x: number; y: number }): HTMLElement {
 		const { normalized, css } = this.getViewportPoint(point)
 		const hit = document.elementFromPoint(css.x, css.y)
@@ -309,6 +334,7 @@ export class PageController extends EventTarget {
 	): Promise<ActionResult> {
 		try {
 			const { element, method, resolvedPoint } = this.resolveElementAtPoint('click', point, options)
+			const viewport = this.viewportSnapshot()
 			const rect = element.getBoundingClientRect()
 			await clickElement(element)
 			return {
@@ -318,6 +344,7 @@ export class PageController extends EventTarget {
 					method,
 					resolvedPoint,
 					targetBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+					viewport,
 				},
 			}
 		} catch (error) {
@@ -332,14 +359,13 @@ export class PageController extends EventTarget {
 	): Promise<ActionResult> {
 		try {
 			let { element, method, resolvedPoint } = this.resolveElementAtPoint('type', point, options)
+			const viewport = this.viewportSnapshot()
 			if (
 				!(element instanceof HTMLInputElement) &&
 				!(element instanceof HTMLTextAreaElement) &&
 				!element.isContentEditable
 			) {
-				const candidate = element.closest<HTMLElement>(
-					'input, textarea, [contenteditable="true"]'
-				)
+				const candidate = element.closest<HTMLElement>('input, textarea, [contenteditable="true"]')
 				if (candidate) {
 					element = candidate
 					method = 'actionable-ancestor'
@@ -354,6 +380,7 @@ export class PageController extends EventTarget {
 					method,
 					resolvedPoint,
 					targetBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+					viewport,
 				},
 			}
 		} catch (error) {
@@ -368,6 +395,7 @@ export class PageController extends EventTarget {
 	): Promise<ActionResult> {
 		try {
 			let { element, method, resolvedPoint } = this.resolveElementAtPoint('select', point, options)
+			const viewport = this.viewportSnapshot()
 			if (!(element instanceof HTMLSelectElement)) {
 				const candidate = element.closest('select')
 				if (candidate instanceof HTMLSelectElement) {
@@ -387,6 +415,7 @@ export class PageController extends EventTarget {
 					method,
 					resolvedPoint,
 					targetBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+					viewport,
 				},
 			}
 		} catch (error) {
@@ -411,15 +440,12 @@ export class PageController extends EventTarget {
 					: Math.min(1, Math.max(0, options.fraction))
 			const positive = options.direction === 'down' || options.direction === 'right'
 			const pixels = extent * fraction * (positive ? 1 : -1)
-			const message = horizontal
-				? await scrollHorizontally(pixels)
-				: await scrollVertically(pixels)
+			const message = horizontal ? await scrollHorizontally(pixels) : await scrollVertically(pixels)
 			return { success: true, message }
 		} catch (error) {
 			return { success: false, message: `❌ Failed to scroll viewport: ${error}` }
 		}
 	}
-
 
 	/**
 	 * Click element by index
