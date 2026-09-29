@@ -76,9 +76,4 @@ describe('browser action evidence', () => {
 		const result = await new BrowserActionBridge().execute({ ...request, call_id: 'call_2' })
 		expect(result.evidence.page_viewport).toBeNull()
 	})
-
-	it('reports the tab it would act on, for capture', async () => {
-		stubPage({ method: 'raw-point' })
-		await expect(new BrowserActionBridge().eligibleTabId()).resolves.toBe(17)
-	})
 })

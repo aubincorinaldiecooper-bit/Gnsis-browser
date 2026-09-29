@@ -1,7 +1,7 @@
 import type { PointActionOptions } from '@page-agent/page-controller'
 
 import { RemotePageController } from '@/agent/RemotePageController'
-import { TabsController } from '@/agent/TabsController'
+import { TabsController, findEligibleTab } from '@/agent/TabsController'
 
 import { frameSourceTab } from './FrameProvenance'
 
@@ -195,12 +195,17 @@ export class BrowserActionBridge {
 		this.tabs.dispose()
 	}
 
-	/** The tab actions would run on now: the one to capture for GNSIS. */
+	/**
+	 * The tab actions would run on now: the one to capture for GNSIS.
+	 *
+	 * Capture can start while an action is running, so this only looks the tab
+	 * up. Re-attaching here would clear and re-point the actuator's current tab
+	 * under the action, which could then fail, or land on a tab its frame never
+	 * came from.
+	 */
 	async eligibleTabId(): Promise<number> {
-		await this.tabs.attachToActiveTab({ includeAllTabs: true })
-		const tabId = this.tabs.currentTabId
-		if (tabId == null) throw new Error('no eligible browser tab to capture')
-		return tabId
+		const { chosen } = await findEligibleTab()
+		return chosen.id
 	}
 
 	private async executeOnce(
@@ -437,7 +442,11 @@ function validateAuthority(authority: BrowserActionAuthority | null | undefined)
 			throw new Error(`browser action authority requires ${name}`)
 		}
 	}
-	if (!['direct_user', 'mixed', 'observed_untrusted', 'delegated_result', 'unknown'].includes(authority.provenance)) {
+	if (
+		!['direct_user', 'mixed', 'observed_untrusted', 'delegated_result', 'unknown'].includes(
+			authority.provenance
+		)
+	) {
 		throw new Error('browser action authority has invalid provenance')
 	}
 	if (!['allow', 'confirm', 'deny'].includes(authority.policy_decision)) {
@@ -458,7 +467,10 @@ function validateAuthority(authority: BrowserActionAuthority | null | undefined)
 	if (authority.policy_decision === 'confirm' && authority.confirmation !== 'approved') {
 		throw new Error('browser action requires an approved confirmation')
 	}
-	if (authority.policy_decision === 'allow' && !['not_required', 'approved'].includes(authority.confirmation)) {
+	if (
+		authority.policy_decision === 'allow' &&
+		!['not_required', 'approved'].includes(authority.confirmation)
+	) {
 		throw new Error('browser action authority does not permit execution')
 	}
 }
