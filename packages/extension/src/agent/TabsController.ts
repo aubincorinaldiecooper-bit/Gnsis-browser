@@ -155,44 +155,49 @@ export class TabsController {
 			payload: { windowId: await getOwnWindowId() },
 		})
 		const active = activeTabResult?.tab as chrome.tabs.Tab | undefined
-		if (!active?.id || active.windowId == null) {
-			throw new Error(activeTabResult?.error || 'Failed to get active tab')
+		if (!active || active.windowId == null) {
+			throw new Error(activeTabResult?.error || 'Failed to resolve browser window')
 		}
-
-		this.initialTabId = active.id
 		this.windowId = active.windowId
 
+		const result = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'get_window_tabs',
+			payload: { windowId: this.windowId },
+		})
+		const windowTabs = ((result?.tabs as chrome.tabs.Tab[] | undefined) ?? []).filter(
+			(tab) => tab.id && !tab.pinned && isContentScriptAllowed(tab.url)
+		)
+		const eligibleActive = windowTabs.find((tab) => tab.active)
+		const fallback = [...windowTabs].sort(
+			(a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)
+		)[0]
+		const chosen = eligibleActive ?? fallback
+		if (!chosen?.id) {
+			throw new Error('No eligible webpage tab is available for browser execution')
+		}
+
+		this.initialTabId = chosen.id
 		if (includeAllTabs) {
-			const result = await sendMessage({
-				type: 'TAB_CONTROL',
-				action: 'get_window_tabs',
-				payload: { windowId: this.windowId },
-			})
-			const tabs = (result?.tabs as chrome.tabs.Tab[] | undefined) ?? []
-			for (const tab of tabs) {
-				if (tab.id && isContentScriptAllowed(tab.url)) {
-					this.addTab({
-						id: tab.id,
-						isInitial: tab.id === active.id,
-						url: tab.url,
-						title: tab.title,
-						status: tab.status,
-					})
-				}
+			for (const tab of windowTabs) {
+				this.addTab({
+					id: tab.id!,
+					isInitial: tab.id === chosen.id,
+					url: tab.url,
+					title: tab.title,
+					status: tab.status,
+				})
 			}
-		}
-
-		if (!this.tabs.find((tab) => tab.id === active.id)) {
+		} else {
 			this.addTab({
-				id: active.id,
+				id: chosen.id,
 				isInitial: true,
-				url: active.url,
-				title: active.title,
-				status: active.status,
+				url: chosen.url,
+				title: chosen.title,
+				status: chosen.status,
 			})
 		}
-
-		await this.updateCurrentTabId(active.id)
+		await this.updateCurrentTabId(chosen.id)
 	}
 
 	async openNewTab(url: string, options: { signal?: AbortSignal } = {}): Promise<string> {
@@ -237,37 +242,43 @@ export class TabsController {
 
 	async navigateCurrent(url: string, options: { signal?: AbortSignal } = {}): Promise<string> {
 		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
+		const tabId = this.currentTabId
+		const before = await this.getLiveTabInfo(tabId)
 		const result = await sendMessage({
 			type: 'TAB_CONTROL',
 			action: 'navigate_current',
-			payload: { tabId: this.currentTabId, url },
+			payload: { tabId, url },
 		})
 		if (!result?.success) throw new Error(result?.error || 'Failed to navigate current tab')
-		await this.waitUntilTabLoaded(this.currentTabId, options)
+		await this.waitForPostCommandNavigation(tabId, before.url, options.signal)
 		return `✅ Navigated current tab to ${url}`
 	}
 
 	async goBack(options: { signal?: AbortSignal } = {}): Promise<string> {
 		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
+		const tabId = this.currentTabId
+		const before = await this.getLiveTabInfo(tabId)
 		const result = await sendMessage({
 			type: 'TAB_CONTROL',
 			action: 'go_back',
-			payload: { tabId: this.currentTabId },
+			payload: { tabId },
 		})
 		if (!result?.success) throw new Error(result?.error || 'Failed to go back')
-		await this.waitUntilTabLoaded(this.currentTabId, options)
+		await this.waitForPostCommandNavigation(tabId, before.url, options.signal)
 		return '✅ Went back in the current tab.'
 	}
 
 	async reloadCurrent(options: { signal?: AbortSignal } = {}): Promise<string> {
 		if (!this.currentTabId) throw new Error('No active browser tab is attached.')
+		const tabId = this.currentTabId
+		const before = await this.getLiveTabInfo(tabId)
 		const result = await sendMessage({
 			type: 'TAB_CONTROL',
 			action: 'reload_current',
-			payload: { tabId: this.currentTabId },
+			payload: { tabId },
 		})
 		if (!result?.success) throw new Error(result?.error || 'Failed to reload current tab')
-		await this.waitUntilTabLoaded(this.currentTabId, options)
+		await this.waitForPostCommandNavigation(tabId, before.url, options.signal)
 		return '✅ Reloaded the current tab.'
 	}
 
@@ -418,28 +429,48 @@ export class TabsController {
 	}
 
 	async waitUntilTabLoaded(tabId: number, options: { signal?: AbortSignal } = {}): Promise<void> {
-		const tab = this.tabs.find((t) => t.id === tabId)
-		if (!tab) throw new Error(`Tab ID ${tabId} not found in tab list.`)
-		if (tab.status === 'complete') return
-
-		// When a tracked tab is closed or untracked.
-		// The tab object will be removed from the tab list.
-		// Finding the latest tab object is the only way to know if it's closed.
-
 		debug('waitUntilTabLoaded', tabId)
 		await waitUntil(
 			async () => {
-				await this.syncTabs()
-				const latest = this.tabs.find((t) => t.id === tabId)
-				return !latest || latest.status !== 'loading'
+				const live = await this.getLiveTabInfo(tabId)
+				return live.status !== 'loading'
 			},
 			4_000,
 			false,
 			options.signal
 		)
+	}
 
-		const latest = this.tabs.find((t) => t.id === tabId)
-		if (latest?.status === 'unloaded') throw new Error(`Tab ID ${tabId} is unloaded.`)
+	private async getLiveTabInfo(
+		tabId: number
+	): Promise<{ title: string; url: string; status?: 'loading' | 'unloaded' | 'complete' }> {
+		const result = await sendMessage({
+			type: 'TAB_CONTROL',
+			action: 'get_tab_info',
+			payload: { tabId },
+		})
+		if (result?.error) throw new Error(result.error)
+		return { title: result?.title || '', url: result?.url || '', status: result?.status }
+	}
+
+	private async waitForPostCommandNavigation(
+		tabId: number,
+		beforeUrl: string,
+		signal?: AbortSignal
+	): Promise<void> {
+		let sawTransition = false
+		const started = Date.now()
+		await waitUntil(
+			async () => {
+				const live = await this.getLiveTabInfo(tabId)
+				if (live.status === 'loading' || live.url !== beforeUrl) sawTransition = true
+				if (live.status !== 'complete') return false
+				return sawTransition || Date.now() - started >= 250
+			},
+			4_000,
+			false,
+			signal
+		)
 	}
 
 	/**

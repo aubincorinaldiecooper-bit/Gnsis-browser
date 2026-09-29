@@ -17,7 +17,11 @@ import type { ExecutionResult } from '@page-agent/core'
 import { useEffect, useRef, useState } from 'react'
 
 import type { ExtConfig } from '@/agent/useAgent'
-import type { BrowserDecisionRequest, BrowserDecisionResult } from '@/vision/BrowserActionBridge'
+import {
+	parseBrowserDecisionRequest,
+	type BrowserDecisionRequest,
+	type BrowserDecisionResult,
+} from '@/vision/BrowserActionBridge'
 
 // --- Protocol types ---
 
@@ -29,6 +33,7 @@ interface ExecuteMessage {
 
 interface StopMessage {
 	type: 'stop'
+	call_id?: string
 }
 
 interface BrowserActionMessage extends BrowserDecisionRequest {
@@ -39,6 +44,7 @@ type InboundMessage = ExecuteMessage | StopMessage | BrowserActionMessage
 
 interface ReadyMessage {
 	type: 'ready'
+	session_id: string
 }
 
 interface ResultMessage {
@@ -69,6 +75,8 @@ export interface HubWsHandlers {
 		config?: Record<string, unknown>
 	) => Promise<{ success: boolean; data: string }>
 	onBrowserAction: (request: BrowserDecisionRequest) => Promise<BrowserDecisionResult>
+	onBrowserCancel: (callId?: string) => void
+	onSessionReset: (sessionId: string) => void
 	onStop: () => void
 }
 
@@ -108,8 +116,10 @@ export class HubWs {
 		this.#ws = ws
 
 		ws.addEventListener('open', () => {
+			const sessionId = crypto.randomUUID()
+			this.#handlers.onSessionReset(sessionId)
 			this.#setState('connected')
-			this.#send({ type: 'ready' })
+			this.#send({ type: 'ready', session_id: sessionId })
 		})
 
 		ws.addEventListener('close', () => {
@@ -165,6 +175,7 @@ export class HubWs {
 				this.#handleBrowserAction(msg)
 				break
 			case 'stop':
+				this.#handlers.onBrowserCancel(msg.call_id)
 				this.#handlers.onStop()
 				break
 		}
@@ -199,7 +210,8 @@ export class HubWs {
 
 		this.#busy = true
 		try {
-			const { type: _type, ...request } = msg
+			const { type: _type, ...payload } = msg
+			const request = parseBrowserDecisionRequest(payload)
 			const result = await this.#handlers.onBrowserAction(request)
 			this.#send({ type: 'browser.action.result', ...result })
 		} catch (err) {
@@ -242,15 +254,33 @@ export function useHubWs(
 	stop: () => void,
 	configure: (config: ExtConfig) => Promise<void>,
 	config: ExtConfig | null,
-	executeBrowserAction: (request: BrowserDecisionRequest) => Promise<BrowserDecisionResult>
+	executeBrowserAction: (request: BrowserDecisionRequest) => Promise<BrowserDecisionResult>,
+	cancelBrowserAction: (callId?: string) => void,
+	resetBrowserSession: (sessionId: string) => void
 ): { wsState: HubWsState } {
 	const wsPort = new URLSearchParams(location.search).get('ws')
 	const [wsState, setWsState] = useState<HubWsState>(() => (wsPort ? 'connecting' : 'disconnected'))
 	const hubWsRef = useRef<HubWs | null>(null)
 
-	const latestRef = useRef({ execute, stop, configure, config, executeBrowserAction })
+	const latestRef = useRef({
+		execute,
+		stop,
+		configure,
+		config,
+		executeBrowserAction,
+		cancelBrowserAction,
+		resetBrowserSession,
+	})
 	useEffect(() => {
-		latestRef.current = { execute, stop, configure, config, executeBrowserAction }
+		latestRef.current = {
+			execute,
+			stop,
+			configure,
+			config,
+			executeBrowserAction,
+			cancelBrowserAction,
+			resetBrowserSession,
+		}
 	})
 
 	useEffect(() => {
@@ -268,6 +298,8 @@ export function useHubWs(
 					return { success: result.success, data: result.data }
 				},
 				onBrowserAction: (request) => latestRef.current.executeBrowserAction(request),
+				onBrowserCancel: (callId) => latestRef.current.cancelBrowserAction(callId),
+				onSessionReset: (sessionId) => latestRef.current.resetBrowserSession(sessionId),
 				onStop: () => latestRef.current.stop(),
 			},
 			setWsState

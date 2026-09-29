@@ -85,7 +85,6 @@ export function initPageController() {
 			case 'scroll':
 			case 'scroll_horizontally':
 			case 'scroll_viewport':
-			case 'press_escape':
 			case 'execute_javascript':
 				pc[methodName](...(payload || []))
 					.then((result: any) => sendResponse(result))
@@ -139,8 +138,6 @@ function getMethodName(action: string): string {
 			return 'scrollHorizontally' as const
 		case 'scroll_viewport':
 			return 'scrollViewport' as const
-		case 'press_escape':
-			return 'pressEscape' as const
 		case 'execute_javascript':
 			return 'executeJavascript' as const
 

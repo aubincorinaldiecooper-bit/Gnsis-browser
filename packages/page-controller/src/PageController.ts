@@ -43,9 +43,16 @@ export interface BrowserState {
 	footer: string
 }
 
+export interface ActionExecutionMetadata {
+	method: string
+	resolvedPoint?: { x: number; y: number }
+	targetBox?: { x: number; y: number; width: number; height: number }
+}
+
 interface ActionResult {
 	success: boolean
 	message: string
+	execution?: ActionExecutionMetadata
 }
 
 /**
@@ -274,21 +281,26 @@ export class PageController extends EventTarget {
 		action: PointActionKind,
 		point: { x: number; y: number },
 		options: PointActionOptions
-	): { element: HTMLElement; method: string } {
+	): { element: HTMLElement; method: string; resolvedPoint: { x: number; y: number } } {
 		if (options.resolveTarget) {
 			const { css } = this.getViewportPoint(point)
 			const resolved = resolveActionTarget(action, css, {
 				maxRadiusPx: options.maxRadiusPx,
 			})
 			if (resolved.element) {
-				return { element: resolved.element, method: resolved.method }
+				return {
+					element: resolved.element,
+					method: resolved.method,
+					resolvedPoint: resolved.resolvedPoint ?? css,
+				}
 			}
 
 			const reason = resolved.ambiguous ? 'ambiguous nearby controls' : 'no safe actionable target'
 			throw new Error(`Actuator target resolution abstained: ${reason}`)
 		}
 
-		return { element: this.getElementAtPoint(point), method: 'raw-point' }
+		const { css } = this.getViewportPoint(point)
+		return { element: this.getElementAtPoint(point), method: 'raw-point', resolvedPoint: css }
 	}
 
 	async clickPoint(
@@ -296,11 +308,17 @@ export class PageController extends EventTarget {
 		options: PointActionOptions = {}
 	): Promise<ActionResult> {
 		try {
-			const { element, method } = this.resolveElementAtPoint('click', point, options)
+			const { element, method, resolvedPoint } = this.resolveElementAtPoint('click', point, options)
+			const rect = element.getBoundingClientRect()
 			await clickElement(element)
 			return {
 				success: true,
 				message: `✅ Clicked visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}) via ${method}.`,
+				execution: {
+					method,
+					resolvedPoint,
+					targetBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+				},
 			}
 		} catch (error) {
 			return { success: false, message: `❌ Failed to click visual target: ${error}` }
@@ -313,7 +331,7 @@ export class PageController extends EventTarget {
 		options: PointActionOptions = {}
 	): Promise<ActionResult> {
 		try {
-			let { element, method } = this.resolveElementAtPoint('type', point, options)
+			let { element, method, resolvedPoint } = this.resolveElementAtPoint('type', point, options)
 			if (
 				!(element instanceof HTMLInputElement) &&
 				!(element instanceof HTMLTextAreaElement) &&
@@ -327,10 +345,16 @@ export class PageController extends EventTarget {
 					method = 'actionable-ancestor'
 				}
 			}
+			const rect = element.getBoundingClientRect()
 			await inputTextElement(element, text)
 			return {
 				success: true,
 				message: `✅ Typed into visual target at (${point.x.toFixed(3)}, ${point.y.toFixed(3)}) via ${method}.`,
+				execution: {
+					method,
+					resolvedPoint,
+					targetBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+				},
 			}
 		} catch (error) {
 			return { success: false, message: `❌ Failed to type into visual target: ${error}` }
@@ -343,7 +367,7 @@ export class PageController extends EventTarget {
 		options: PointActionOptions = {}
 	): Promise<ActionResult> {
 		try {
-			let { element, method } = this.resolveElementAtPoint('select', point, options)
+			let { element, method, resolvedPoint } = this.resolveElementAtPoint('select', point, options)
 			if (!(element instanceof HTMLSelectElement)) {
 				const candidate = element.closest('select')
 				if (candidate instanceof HTMLSelectElement) {
@@ -354,10 +378,16 @@ export class PageController extends EventTarget {
 			if (!(element instanceof HTMLSelectElement)) {
 				throw new Error('Visual target is not a select element')
 			}
+			const rect = element.getBoundingClientRect()
 			await selectOptionElement(element, optionText)
 			return {
 				success: true,
 				message: `✅ Selected option (${optionText}) at visual target via ${method}.`,
+				execution: {
+					method,
+					resolvedPoint,
+					targetBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+				},
 			}
 		} catch (error) {
 			return { success: false, message: `❌ Failed to select visual target: ${error}` }
@@ -365,48 +395,28 @@ export class PageController extends EventTarget {
 	}
 
 	async scrollViewport(options: {
-		direction: 'up' | 'down'
+		direction: 'up' | 'down' | 'left' | 'right'
 		amount: 'small' | 'page'
 		/** Optional exact viewport fraction for adapter parity. */
 		fraction?: number
 	}): Promise<ActionResult> {
 		try {
+			const horizontal = options.direction === 'left' || options.direction === 'right'
+			const extent = horizontal ? window.innerWidth : window.innerHeight
 			const fraction =
 				options.fraction == null
 					? options.amount === 'page'
 						? 0.9
 						: 0.35
 					: Math.min(1, Math.max(0, options.fraction))
-			const pixels = window.innerHeight * fraction * (options.direction === 'down' ? 1 : -1)
-			const message = await scrollVertically(pixels)
+			const positive = options.direction === 'down' || options.direction === 'right'
+			const pixels = extent * fraction * (positive ? 1 : -1)
+			const message = horizontal
+				? await scrollHorizontally(pixels)
+				: await scrollVertically(pixels)
 			return { success: true, message }
 		} catch (error) {
 			return { success: false, message: `❌ Failed to scroll viewport: ${error}` }
-		}
-	}
-
-
-	/**
-	 * Best-effort browser recovery keystroke in the page context.
-	 * The browser adapter uses this before its bounded recovery click.
-	 */
-	async pressEscape(): Promise<ActionResult> {
-		try {
-			const active = document.activeElement
-			const target = active instanceof HTMLElement ? active : document.body
-			for (const type of ['keydown', 'keyup'] as const) {
-				target.dispatchEvent(
-					new KeyboardEvent(type, {
-						key: 'Escape',
-						code: 'Escape',
-						bubbles: true,
-						cancelable: true,
-					})
-				)
-			}
-			return { success: true, message: '✅ Sent Escape to the current page.' }
-		} catch (error) {
-			return { success: false, message: `❌ Failed to send Escape: ${error}` }
 		}
 	}
 
