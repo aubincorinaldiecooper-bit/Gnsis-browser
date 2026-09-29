@@ -1,3 +1,5 @@
+import { registerFrameSource } from './FrameProvenance'
+
 export interface CapturedPanopticFrame {
 	frameId: string
 	timestampMs: number
@@ -182,8 +184,10 @@ export class TabMediaCapture {
 				const rawTimestamp = response.capturedAtEpochMs - this.taskStartedAtEpochMs
 				const timestampMs = Math.max(this.lastTimestampMs + 1, rawTimestamp)
 				this.lastTimestampMs = timestampMs
+				const frameId = crypto.randomUUID()
+				registerFrameSource(frameId, this.tabId)
 				this.queue.push({
-					frameId: crypto.randomUUID(),
+					frameId,
 					timestampMs,
 					durationMs: intervalMs,
 					imageBase64: response.imageBase64,
