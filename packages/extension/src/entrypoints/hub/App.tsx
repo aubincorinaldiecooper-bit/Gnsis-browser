@@ -13,17 +13,30 @@ import { useHubWs } from './hub-ws'
 export default function App() {
 	const { status, history, activity, currentTask, config, execute, stop, configure } = useAgent()
 	const browserBridgeRef = useRef<BrowserActionBridge | null>(null)
-	if (!browserBridgeRef.current) browserBridgeRef.current = new BrowserActionBridge()
+	const getBrowserBridge = () => {
+		if (!browserBridgeRef.current) browserBridgeRef.current = new BrowserActionBridge()
+		return browserBridgeRef.current
+	}
 	const { wsState } = useHubWs(
 		execute,
 		stop,
 		configure,
 		config,
-		(request) => browserBridgeRef.current!.execute(request)
+		(request) => getBrowserBridge().execute(request),
+		(callId) => {
+			const bridge = getBrowserBridge()
+			if (callId) bridge.cancel(callId)
+			else bridge.cancelAll()
+		},
+		(sessionId) => getBrowserBridge().resetSession(sessionId)
 	)
 
 	useEffect(() => {
-		return () => browserBridgeRef.current?.dispose()
+		const bridge = browserBridgeRef.current
+		return () => {
+			bridge?.dispose()
+			if (browserBridgeRef.current === bridge) browserBridgeRef.current = null
+		}
 	}, [])
 
 	const historyRef = useRef<HTMLDivElement>(null)
