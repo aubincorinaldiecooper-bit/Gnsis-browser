@@ -29,7 +29,7 @@ jobs:
       - name: Stage extension zip
         run: |
           mkdir -p artifacts
-          cp .output/*.zip artifacts/
+          cp packages/extension/.output/*.zip artifacts/
       - name: Upload extension zip
         uses: actions/upload-artifact@v4
         with:
