@@ -38,10 +38,12 @@ export default function App() {
 			getBrowserBridge().resetSession(sessionId)
 			void getFrameStream().stop()
 		},
-		async (options, emit) => {
-			const tabId = await getBrowserBridge().eligibleTabId()
-			const captureSessionId = await getFrameStream().start(tabId, options, emit)
-			return { captureSessionId, tabId }
+		async (options, emit, stopped) => {
+			// Handed over unresolved: the stream registers the capture before the tab
+			// lookup settles, so a stop that arrives meanwhile still cancels it.
+			const tabId = getBrowserBridge().eligibleTabId()
+			const captureSessionId = await getFrameStream().start(tabId, options, emit, stopped)
+			return { captureSessionId, tabId: await tabId }
 		},
 		() => getFrameStream().stop()
 	)

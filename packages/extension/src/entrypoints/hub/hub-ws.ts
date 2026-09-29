@@ -18,10 +18,13 @@
  *   { type: "browser.action.result", call_id, frame_id, success, done, message, evidence }
  *   { type: "capture.started", capture_session_id, tab_id }
  *   { type: "capture.frame", frame_id, captured_at_ms, encoding, image_base64, source }
- *   { type: "capture.stopped", reason }
+ *   { type: "capture.stopped", reason: "requested" | "failed", message?, capture_session_id? }
  *
  * GNSIS drives browser.action and capture: frames go into GNSIS's screen
- * history; actions come back as one structured decision each.
+ * history; actions come back as one structured decision each. A capture that
+ * could not start, or that ended on its own, is reported as `failed` with the
+ * reason in `message`. A start cancelled by a stop or a newer start gets no
+ * answer of its own: the stop, or the newer start, answers for it.
  */
 import type { ExecutionResult } from '@page-agent/core'
 import { useEffect, useRef, useState } from 'react'
@@ -32,7 +35,11 @@ import {
 	type BrowserDecisionResult,
 	parseBrowserDecisionRequest,
 } from '@/vision/BrowserActionBridge'
-import type { CaptureStartOptions, CapturedBrowserFrame } from '@/vision/BrowserFrameStream'
+import type {
+	CaptureFailure,
+	CaptureStartOptions,
+	CapturedBrowserFrame,
+} from '@/vision/BrowserFrameStream'
 
 // --- Protocol types ---
 
@@ -95,7 +102,9 @@ interface CaptureFrameMessage extends CapturedBrowserFrame {
 
 interface CaptureStoppedMessage {
 	type: 'capture.stopped'
-	reason: string
+	reason: 'requested' | 'failed'
+	message?: string
+	capture_session_id?: string
 }
 
 type OutboundMessage =
@@ -122,7 +131,8 @@ export interface HubWsHandlers {
 	onStop: () => void
 	onCaptureStart: (
 		options: CaptureStartOptions,
-		emit: (frame: CapturedBrowserFrame) => void
+		emit: (frame: CapturedBrowserFrame) => void,
+		stopped: (failure: CaptureFailure) => void
 	) => Promise<{ captureSessionId: string; tabId: number }>
 	onCaptureStop: () => Promise<void>
 }
@@ -238,14 +248,19 @@ export class HubWs {
 
 	async #handleCaptureStart(msg: CaptureStartMessage) {
 		try {
-			const { captureSessionId, tabId } = await this.#handlers.onCaptureStart(msg, (frame) =>
-				this.#send({ type: 'capture.frame', ...frame })
+			const { captureSessionId, tabId } = await this.#handlers.onCaptureStart(
+				msg,
+				(frame) => this.#send({ type: 'capture.frame', ...frame }),
+				(failure) => this.#send({ type: 'capture.stopped', ...failure })
 			)
 			this.#send({ type: 'capture.started', capture_session_id: captureSessionId, tab_id: tabId })
 		} catch (err) {
+			// Cancelled by a stop or a newer start, which answer for it.
+			if ((err as { name?: unknown } | null)?.name === 'AbortError') return
 			this.#send({
 				type: 'capture.stopped',
-				reason: err instanceof Error ? err.message : String(err),
+				reason: 'failed',
+				message: err instanceof Error ? err.message : String(err),
 			})
 		}
 	}
@@ -375,7 +390,8 @@ export function useHubWs(
 				onBrowserCancel: (callId) => latestRef.current.cancelBrowserAction(callId),
 				onSessionReset: (sessionId) => latestRef.current.resetBrowserSession(sessionId),
 				onStop: () => latestRef.current.stop(),
-				onCaptureStart: (options, emit) => latestRef.current.startCapture(options, emit),
+				onCaptureStart: (options, emit, stopped) =>
+					latestRef.current.startCapture(options, emit, stopped),
 				onCaptureStop: () => latestRef.current.stopCapture(),
 			},
 			setWsState
